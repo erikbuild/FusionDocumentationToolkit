@@ -1,0 +1,12 @@
+{
+    "autodeskProduct": "Fusion",
+    "type": "addin",
+    "id": "VoronStyleManualMode",
+    "author": "Erik Reynolds (erikbuild)",
+    "description": {
+        "en-US": "Toggle Fusion 360 between the Voron Design Team assembly manual visual preset and Fusion defaults."
+    },
+    "version": "0.1.0",
+    "runOnStartup": true,
+    "supportedOS": "windows|mac"
+}

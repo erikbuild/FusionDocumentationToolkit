@@ -1,0 +1,49 @@
+{
+    "use_custom_panel": false,
+    "panel_id": "CustomPlugins_Panel",
+    "panel_name": "ERIKBUILD",
+    "debug": false,
+    "start_mode": "default",
+    "presets": {
+        "voron": {
+            "label": "Voron Manual Mode",
+            "tooltip": "Voron assembly manual visual preset (click to restore Fusion defaults)",
+            "commands": [
+                {"label": "Environment: Photobooth",             "cmd": "NuCommands.ViewEnvironmentCmd ViewEnvPhotoBoothCommand"},
+                {"label": "Visual style: Wireframe + Visible Edges Only", "visual_style": "WireframeWithVisibleEdgesOnlyVisualStyle"},
+                {"label": "Effect: Ambient Occlusion ON",        "cmd": "NuCommands.ViewAmbientOcclusionCmd ViewAmbientOcclusionOnCommand"},
+                {"label": "Effect: Anti-aliasing ON",            "cmd": "Options.MSAA /on"},
+                {"label": "Effect: Environment Dome OFF",        "cmd": "NuCommands.ViewDomeCmd ViewDomeOffCommand"},
+                {"label": "Effect: Ground Plane OFF",            "cmd": "NuCommands.ViewGroundPlaneCmd ViewGroundPlaneOffCommand"},
+                {"label": "Effect: Ground Shadow OFF",           "cmd": "NuCommands.ViewGroundShadowCmd ViewGroundShadowOffCommand"},
+                {"label": "Effect: Ground Reflection OFF",       "cmd": "NuCommands.ViewGroundReflectionCmd ViewGroundReflectionOffCommand"},
+                {"label": "Effect: Object Shadow OFF",           "cmd": "Options.ObjectShadowType /none"},
+                {"label": "Camera: Orthographic",                "cmd": "NuCommands.ViewCameraCmd ViewCameraOrthoCommand", "tentative": true},
+                {"label": "Layout grid: OFF",                    "cmd": "NuCommands.ViewLayoutGridOnCmd ViewLayoutGridOffCommand"},
+                {"label": "Pref: Selection Display = Normal",    "cmd": "Options.SelectionEffect /normal"},
+                {"label": "Pref: Degraded Selection = Normal",   "cmd": "Options.SelectionEffect /normal /degraded", "tentative": true},
+                {"label": "Pref: Transparency = Better Display", "cmd": "Options.TransparencyEffect /advanced", "tentative": true}
+            ]
+        },
+        "default": {
+            "label": "Fusion Default Mode",
+            "tooltip": "Fusion default visual settings (click to switch to Voron manual mode)",
+            "commands": [
+                {"label": "Environment: Photobooth",             "cmd": "NuCommands.ViewEnvironmentCmd ViewEnvPhotoBoothCommand"},
+                {"label": "Visual style: Shaded with Visible Edges Only", "visual_style": "ShadedWithVisibleEdgesOnlyVisualStyle"},
+                {"label": "Effect: Ambient Occlusion ON",        "cmd": "NuCommands.ViewAmbientOcclusionCmd ViewAmbientOcclusionOnCommand"},
+                {"label": "Effect: Anti-aliasing ON",            "cmd": "Options.MSAA /on"},
+                {"label": "Effect: Environment Dome ON",         "cmd": "NuCommands.ViewDomeCmd ViewDomeOnCommand", "tentative": true},
+                {"label": "Effect: Ground Plane ON",             "cmd": "NuCommands.ViewGroundPlaneCmd ViewGroundPlaneOnCommand", "tentative": true},
+                {"label": "Effect: Ground Shadow ON",            "cmd": "NuCommands.ViewGroundShadowCmd ViewGroundShadowOnCommand", "tentative": true},
+                {"label": "Effect: Ground Reflection OFF",       "cmd": "NuCommands.ViewGroundReflectionCmd ViewGroundReflectionOffCommand"},
+                {"label": "Effect: Object Shadow Soft2",         "cmd": "NuCommands.ViewObjectShadowCmd ViewObjectShadowSoft2Command"},
+                {"label": "Camera: Perspective with Ortho Faces","cmd": "NuCommands.ViewCameraCmd ViewCameraPerspWithOrthoFacesCommand"},
+                {"label": "Layout grid: ON",                     "cmd": "NuCommands.ViewLayoutGridOnCmd ViewLayoutGridOnCommand", "tentative": true},
+                {"label": "Pref: Selection Display = Normal",    "cmd": "Options.SelectionEffect /normal"},
+                {"label": "Pref: Degraded Selection = Simplified","cmd": "Options.SelectionEffect /simplified /degraded", "tentative": true},
+                {"label": "Pref: Transparency = Better Performance", "cmd": "Options.TransparencyEffect /simple", "tentative": true}
+            ]
+        }
+    }
+}
