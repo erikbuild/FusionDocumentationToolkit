@@ -6,7 +6,7 @@
     "description": {
         "en-US": "Toolkit for creating Fusion 360 documentation: configurable visual-style presets (Voron-style preset bundled), hotkey-friendly viewport image capture with DPI metadata, and a dedicated DOCUMENTATION toolbar panel."
     },
-    "version": "0.2.0",
+    "version": "1.0.0",
     "runOnStartup": true,
     "supportedOS": "windows|mac"
 }

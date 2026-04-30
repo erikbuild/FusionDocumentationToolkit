@@ -1,6 +1,6 @@
 # FusionDocumentationToolkit
 
-![Version 0.2](https://img.shields.io/badge/version-0.2-blue)
+![Version 1.0](https://img.shields.io/badge/version-1.0-blue)
 
 A Fusion 360 add-in for documentation and assembly-manual workflows: a one-click visual-style preset toggle, hotkey-friendly viewport image capture with auto-numbered filenames and embedded DPI metadata, and a custom toolbar panel.
 
@@ -12,7 +12,7 @@ A Fusion 360 add-in for documentation and assembly-manual workflows: a one-click
 **macOS**
 ```
 cd ~/Library/Application\ Support/Autodesk/Autodesk\ Fusion\ 360/API/AddIns/
-git clone git@github.com:erikbuild/FusionDocumentationToolkit.git
+git clone https://github.com/erikbuild/FusionDocumentationToolkit.git
 ```
 
 **Windows**
@@ -22,11 +22,13 @@ Then in Fusion: **Utilities → Add-Ins** (or `Shift+S`), find **FusionDocumenta
 
 ## Assign a hotkey to Capture Image
 
-This is the headline workflow — pressing one key to fire a screenshot. Fusion's API can't bind shortcuts programmatically, so do it once via the UI:
+This is the headline workflow — pressing one key combo to fire a screenshot. Fusion's API can't bind shortcuts programmatically, so do it once via the UI:
 
-1. Right-click the **Capture Image** button on the **DOCUMENTATION** panel.
-2. Choose **Change Keyboard Shortcut**.
-3. Pick a key (`F12` works well).
+1. On the **DOCUMENTATION** panel, click the **dropdown arrow** next to the panel label.
+2. Hover over **Capture Image** in the dropdown.
+3. Click the **⋯** (three-dot menu) that appears on the right.
+4. Choose **Change Keyboard Shortcut**.
+5. Press the key combo — `Control+Shift+S` is a good default.
 
 Repeat for **Configure Capture** if you want a separate shortcut for the settings dialog.
 
