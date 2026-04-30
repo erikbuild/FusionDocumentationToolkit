@@ -1,9 +1,18 @@
 {
-    "use_custom_panel": false,
-    "panel_id": "CustomPlugins_Panel",
-    "panel_name": "ERIKBUILD",
+    "use_custom_panel": true,
+    "panel_id": "Documentation_Panel",
+    "panel_name": "DOCUMENTATION",
     "debug": false,
     "start_mode": "default",
+    "capture": {
+        "default_width": 1920,
+        "default_height": 1080,
+        "default_format": "png",
+        "default_transparent": false,
+        "default_antialias": true,
+        "default_dpi": 300,
+        "filename_prefix": "capture"
+    },
     "presets": {
         "voron": {
             "label": "Voron Manual Mode",
