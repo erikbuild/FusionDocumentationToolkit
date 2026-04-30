@@ -75,6 +75,24 @@ def get_or_create_custom_panel(panel_id, panel_name):
         return None
 
 
+def purge_stale_controls(cmd_ids):
+    """Remove every toolbar control matching these command IDs from every panel.
+    Catches orphaned buttons from prior runs that placed controls on different
+    panels (e.g. before use_custom_panel was switched on)."""
+    if not _ui:
+        return
+    panels = _ui.allToolbarPanels
+    for i in range(panels.count):
+        panel = panels.item(i)
+        for cid in cmd_ids:
+            try:
+                ctrl = panel.controls.itemById(cid)
+                if ctrl:
+                    ctrl.deleteMe()
+            except Exception:
+                pass
+
+
 def register_command(panel, cmd_id, name, description, resource_dir, created_handler):
     """Create or refresh a button command, attach the supplied CommandCreated
     handler, and place a control on the given panel. Returns the CommandDefinition
@@ -400,6 +418,8 @@ def run(context):
 
         init_capture_defaults()
 
+        purge_stale_controls((CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID))
+
         panel = None
         if _config.get('use_custom_panel'):
             panel_id = _config.get('panel_id', 'ErikBuildPlugins_Panel')
@@ -438,17 +458,14 @@ def stop(context):
     global _handlers, _active_panel_id, _custom_panel_id
     try:
         cmd_ids = (CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID)
-        if _active_panel_id:
-            panel = _ui.allToolbarPanels.itemById(_active_panel_id)
-            if panel:
-                for cid in cmd_ids:
-                    ctrl = panel.controls.itemById(cid)
-                    if ctrl:
-                        ctrl.deleteMe()
-                if _custom_panel_id and _active_panel_id == _custom_panel_id and panel.controls.count == 0:
-                    panel.deleteMe()
-            _active_panel_id = None
-            _custom_panel_id = None
+        purge_stale_controls(cmd_ids)
+
+        if _custom_panel_id:
+            panel = _ui.allToolbarPanels.itemById(_custom_panel_id)
+            if panel and panel.controls.count == 0:
+                panel.deleteMe()
+        _active_panel_id = None
+        _custom_panel_id = None
 
         for cid in cmd_ids:
             cmd_def = _ui.commandDefinitions.itemById(cid)
