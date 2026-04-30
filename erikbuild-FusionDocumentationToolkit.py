@@ -415,16 +415,19 @@ def run(context):
         if panel:
             _active_panel_id = panel.id
 
-        resource_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
+        resources_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
 
         register_command(panel, CMD_ID, CMD_NAME, CMD_DESCRIPTION,
-                         resource_dir, CommandCreatedHandler())
+                         os.path.join(resources_root, 'voronToggle'),
+                         CommandCreatedHandler())
         register_command(panel, CAPTURE_CMD_ID, CAPTURE_CMD_NAME,
                          CAPTURE_CMD_DESCRIPTION,
-                         resource_dir, CaptureCreatedHandler())
+                         os.path.join(resources_root, 'capture'),
+                         CaptureCreatedHandler())
         register_command(panel, CONFIGURE_CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_NAME,
                          CONFIGURE_CAPTURE_CMD_DESCRIPTION,
-                         resource_dir, ConfigureCaptureCreatedHandler())
+                         os.path.join(resources_root, 'configureCapture'),
+                         ConfigureCaptureCreatedHandler())
 
     except:
         if _ui:
