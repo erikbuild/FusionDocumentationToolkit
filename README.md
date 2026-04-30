@@ -4,7 +4,6 @@
 
 A Fusion 360 add-in for documentation and assembly-manual workflows: a one-click visual-style preset toggle, hotkey-friendly viewport image capture with auto-numbered filenames and embedded DPI metadata, and a custom toolbar panel.
 
-<!-- TODO: drop a demo recording here once you have one -->
 ![Demo](demo.gif)
 
 ## Install
