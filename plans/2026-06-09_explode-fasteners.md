@@ -1,0 +1,1707 @@
+# Explode Fasteners Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Three new silent commands (Explode Fasteners / Restore Fasteners / Flip Last Explode) that copy selected fastener occurrences 15–20mm out along their inferred insertion axis, hide the originals for empty-hole documentation screenshots, and cleanly restore everything afterward.
+
+**Architecture:** A new `explode.py` module beside the main add-in file holds all feature logic, split into pure decision functions (plain-tuple data, pytest-testable, no `adsk` imports needed) and Fusion adapter functions (verified by a self-contained in-Fusion integration script). The main file only registers the three commands and delegates. Spec: `specs/2026-06-09_explode-fasteners.md`. API research: `research/2026-06-09_fastener-move-copy-feasibility.md`.
+
+**Tech Stack:** Fusion 360 add-in API (Python, `adsk.core`/`adsk.fusion`), pytest for pure logic, in-Fusion script for integration/E2E.
+
+---
+
+## Ground Rules For The Executing Agent
+
+1. **NEVER run `git commit`.** Erik commits all changes himself. Every "Checkpoint" step means: stop, summarize what changed, suggest a commit message, and wait for Erik.
+2. **You cannot run Fusion.** Steps marked **[FUSION — Erik runs]** require Erik to execute a script inside Fusion and paste the Text Commands palette output back. Stop and wait at each one.
+3. **Spike findings gate later tasks.** Task 2's findings are recorded in this file. If a finding contradicts the assumed API behavior in Tasks 8–12, STOP and revise with Erik before proceeding — do not improvise around a failed assumption.
+4. All distances inside the API are **centimeters**. Config values are millimeters. Conversion happens only at `lift_distance_mm` → `mm_to_cm`.
+5. Fusion's Python is 3.x but has no pip packages; `explode.py` must import cleanly both inside Fusion (adsk available) and under pytest (adsk absent) — that's what the guarded import in Task 4 is for.
+
+---
+
+### Task 1: Branch and test scaffolding
+
+**Files:**
+- Create: `tests/conftest.py`
+- Modify: `.gitignore`
+
+- [ ] **Step 1: Create the working branch**
+
+```bash
+git -C /Users/erik/Code/FusionDocumentationToolkit checkout -b explode-fasteners
+```
+
+Expected: `Switched to a new branch 'explode-fasteners'`
+
+- [ ] **Step 2: Verify pytest is available**
+
+```bash
+python3 -m pytest --version
+```
+
+Expected: a version line (e.g. `pytest 8.x`). If the command fails, run `python3 -m pip install --user pytest` and re-verify.
+
+- [ ] **Step 3: Create `tests/conftest.py`** so tests can `import explode` from the repo root:
+
+```python
+# ABOUTME: Pytest configuration — puts the repo root on sys.path so tests
+# ABOUTME: can import the explode module without packaging.
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+```
+
+- [ ] **Step 4: Check `.gitignore` covers `__pycache__`**
+
+Read `.gitignore`. If it does not already ignore `__pycache__/`, append a line containing exactly `__pycache__/`.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add test scaffolding for explode feature.`
+
+---
+
+### Task 2: Pre-implementation spike (verifies three undocumented API behaviors)
+
+**Files:**
+- Create: `tests/fusion_spike/ExplodeSpike.py`
+- Create: `tests/fusion_spike/ExplodeSpike.manifest`
+
+The spec flags three behaviors that must be verified in Fusion before the adapter code is final: (1) `addExistingComponent` transform coordinate space with a nested original, (2) `deleteMe` timeline cleanliness in parametric mode, (3) deepest-occurrence resolution from a body proxy via `allOccurrencesByComponent` + entity-token matching.
+
+- [ ] **Step 1: Write the spike script** at `tests/fusion_spike/ExplodeSpike.py`:
+
+```python
+# ABOUTME: One-shot Fusion script that verifies three API behaviors the
+# ABOUTME: explode feature depends on. Logs findings to the Text Commands palette.
+import adsk.core
+import adsk.fusion
+import traceback
+
+
+def log(app, msg):
+    app.log('[ExplodeSpike] ' + msg)
+
+
+def run(context):
+    app = adsk.core.Application.get()
+    ui = app.userInterface
+    try:
+        doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        root = design.rootComponent
+
+        # Fixture: a subassembly containing one child component with a small box body,
+        # the subassembly itself translated away from origin so coordinate spaces differ.
+        sub_transform = adsk.core.Matrix3D.create()
+        sub_transform.translation = adsk.core.Vector3D.create(10.0, 0, 0)
+        sub_occ = root.occurrences.addNewComponent(sub_transform)
+        sub_occ.component.name = 'SubAssembly'
+
+        inner_transform = adsk.core.Matrix3D.create()
+        inner_transform.translation = adsk.core.Vector3D.create(0, 5.0, 0)
+        inner_occ = sub_occ.component.occurrences.addNewComponent(inner_transform)
+        inner_occ.component.name = 'InnerPart'
+
+        sketch = inner_occ.component.sketches.add(inner_occ.component.xYConstructionPlane)
+        sketch.sketchCurves.sketchLines.addTwoPointRectangle(
+            adsk.core.Point3D.create(0, 0, 0), adsk.core.Point3D.create(1, 1, 0))
+        extrudes = inner_occ.component.features.extrudeFeatures
+        extrudes.addSimple(sketch.profiles.item(0),
+                           adsk.core.ValueInput.createByReal(1.0),
+                           adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+        # --- Finding 1: addExistingComponent transform coordinate space ---
+        # The nested InnerPart's world translation is (10, 5, 0). Add a copy to root
+        # with translation (10, 5, 3): if the matrix is root-relative, the copy's
+        # transform2.translation reads back as exactly (10, 5, 3).
+        copy_t = adsk.core.Matrix3D.create()
+        copy_t.translation = adsk.core.Vector3D.create(10.0, 5.0, 3.0)
+        timeline_before_copy = design.timeline.count
+        copy_occ = root.occurrences.addExistingComponent(inner_occ.component, copy_t)
+        rt = copy_occ.transform2.translation
+        log(app, 'FINDING 1 (addExistingComponent space): requested (10,5,3), '
+                 'transform2.translation reads ({:.3f},{:.3f},{:.3f}) -> {}'.format(
+                     rt.x, rt.y, rt.z,
+                     'ROOT-RELATIVE as assumed' if (abs(rt.x - 10) < 1e-6 and abs(rt.y - 5) < 1e-6 and abs(rt.z - 3) < 1e-6)
+                     else 'NOT root-relative — STOP AND REVISE PLAN'))
+
+        # --- Finding 2: deleteMe timeline cleanliness (parametric mode) ---
+        timeline_after_copy = design.timeline.count
+        ok = copy_occ.deleteMe()
+        timeline_after_delete = design.timeline.count
+        log(app, 'FINDING 2 (deleteMe timeline): count before copy={}, after copy={}, '
+                 'after delete={} -> {}'.format(
+                     timeline_before_copy, timeline_after_copy, timeline_after_delete,
+                     'CLEAN (back to pre-copy count)' if timeline_after_delete == timeline_before_copy
+                     else 'LEAVES TIMELINE RESIDUE — note for Restore design'))
+        log(app, 'FINDING 2b: deleteMe returned {}'.format(ok))
+
+        # --- Finding 3: deepest-occurrence resolution from a body proxy ---
+        # Take the nested body as a root-context proxy (the same thing a canvas
+        # pick yields), then resolve it back to the deepest occurrence.
+        nested_proxy = None
+        for i in range(root.allOccurrences.count):
+            occ = root.allOccurrences.item(i)
+            if occ.component.name == 'InnerPart':
+                nested_proxy = occ
+        body_proxy = nested_proxy.bRepBodies.item(0)
+        log(app, 'FINDING 3a: body proxy assemblyContext fullPathName = {!r}'.format(
+            body_proxy.assemblyContext.fullPathName if body_proxy.assemblyContext else None))
+        native = body_proxy.nativeObject if body_proxy.assemblyContext else body_proxy
+        comp = native.parentComponent
+        candidates = root.allOccurrencesByComponent(comp)
+        log(app, 'FINDING 3b: native parentComponent = {!r}, candidate occurrences = {}'.format(
+            comp.name, candidates.count))
+        matched = None
+        for i in range(candidates.count):
+            cand = candidates.item(i)
+            for j in range(cand.bRepBodies.count):
+                if cand.bRepBodies.item(j).entityToken == body_proxy.entityToken:
+                    matched = cand
+        log(app, 'FINDING 3c: token match resolved to {!r} -> {}'.format(
+            matched.fullPathName if matched else None,
+            'RESOLUTION WORKS' if matched and matched.fullPathName == nested_proxy.fullPathName
+            else 'RESOLUTION FAILED — STOP AND REVISE PLAN'))
+
+        doc.close(False)
+        log(app, 'Spike complete. Paste all [ExplodeSpike] lines back to the agent.')
+    except Exception:
+        if ui:
+            ui.messageBox('Spike failed:\n{}'.format(traceback.format_exc()))
+```
+
+- [ ] **Step 2: Write the manifest** at `tests/fusion_spike/ExplodeSpike.manifest`:
+
+```json
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "scriptType": "python",
+    "description": "Verifies API behaviors for the explode-fasteners feature."
+}
+```
+
+- [ ] **Step 3 [FUSION — Erik runs]: Run the spike.** In Fusion: Utilities → Add-Ins → Scripts tab → green “+” → select `tests/fusion_spike/`, run **ExplodeSpike**, then copy every `[ExplodeSpike]` line from the Text Commands palette back into the conversation.
+
+- [ ] **Step 4: Record findings in this plan file.** Edit this checklist item to include the three findings verbatim. If Finding 1 is not root-relative or Finding 3 fails, STOP — revise Tasks 8/10 with Erik before continuing. If Finding 2 leaves timeline residue, note it in the spec's Parametric vs Direct Mode section and surface it to Erik (Restore still works; the timeline just isn't pristine).
+
+**Spike findings (fill in):**
+- Finding 1:
+- Finding 2:
+- Finding 3:
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add API spike script for explode feature.`
+
+---
+
+### Task 3: Pure vector helpers
+
+**Files:**
+- Create: `explode.py`
+- Create: `tests/test_explode_logic.py`
+
+- [ ] **Step 1: Write the failing tests** in `tests/test_explode_logic.py`:
+
+```python
+# ABOUTME: Unit tests for the pure decision logic in explode.py — vector math,
+# ABOUTME: axis inference, sign heuristics, and config parsing. No Fusion required.
+import math
+
+import pytest
+
+import explode
+
+
+class TestVectorHelpers:
+    def test_dot(self):
+        assert explode.v_dot((1, 2, 3), (4, 5, 6)) == 32
+
+    def test_norm_produces_unit_vector(self):
+        n = explode.v_norm((3, 0, 4))
+        assert n == pytest.approx((0.6, 0, 0.8))
+
+    def test_scale(self):
+        assert explode.v_scale((1, -2, 0.5), 2) == (2, -4, 1.0)
+
+    def test_sub(self):
+        assert explode.v_sub((5, 5, 5), (1, 2, 3)) == (4, 3, 2)
+
+    def test_cross_right_handed(self):
+        assert explode.v_cross((1, 0, 0), (0, 1, 0)) == (0, 0, 1)
+
+    def test_perpendicular_basis_is_orthonormal(self):
+        for axis in [(0, 0, 1), (1, 0, 0), (0.577, 0.577, 0.577)]:
+            u, w = explode.perpendicular_basis(explode.v_norm(axis))
+            assert explode.v_dot(u, axis) == pytest.approx(0, abs=1e-9)
+            assert explode.v_dot(w, axis) == pytest.approx(0, abs=1e-9)
+            assert explode.v_dot(u, w) == pytest.approx(0, abs=1e-9)
+            assert math.sqrt(explode.v_dot(u, u)) == pytest.approx(1.0)
+            assert math.sqrt(explode.v_dot(w, w)) == pytest.approx(1.0)
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: FAIL/ERROR with `ModuleNotFoundError: No module named 'explode'`.
+
+- [ ] **Step 3: Create `explode.py` with the guarded import and vector helpers:**
+
+```python
+# ABOUTME: Explode/restore/flip of fastener occurrences for documentation
+# ABOUTME: screenshots — pure decision logic plus Fusion API adapters.
+
+import math
+
+try:
+    import adsk.core
+    import adsk.fusion
+except ImportError:
+    adsk = None  # pure decision functions stay importable under pytest
+
+
+# ---------------------------------------------------------------------------
+# Pure decision logic — plain tuples in, plain values out. No adsk access.
+# ---------------------------------------------------------------------------
+
+def v_dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def v_scale(a, s):
+    return (a[0] * s, a[1] * s, a[2] * s)
+
+
+def v_sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def v_cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def v_norm(a):
+    length = math.sqrt(v_dot(a, a))
+    return (a[0] / length, a[1] / length, a[2] / length)
+
+
+def perpendicular_basis(axis):
+    """Two unit vectors perpendicular to axis and to each other, for laying
+    out ring-ray origins around the axis."""
+    helper = (0, 0, 1) if abs(axis[2]) < 0.9 else (1, 0, 0)
+    u = v_norm(v_cross(axis, helper))
+    w = v_norm(v_cross(axis, u))
+    return u, w
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: 6 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add explode module with vector helpers.`
+
+---
+
+### Task 4: Config parsing (distance clamp and unit conversion)
+
+**Files:**
+- Modify: `explode.py`
+- Modify: `tests/test_explode_logic.py`
+
+- [ ] **Step 1: Append the failing tests** to `tests/test_explode_logic.py`:
+
+```python
+class TestLiftDistance:
+    def test_default_when_section_missing(self):
+        assert explode.lift_distance_mm({}) == (20.0, False)
+
+    def test_default_when_config_none(self):
+        assert explode.lift_distance_mm(None) == (20.0, False)
+
+    def test_reads_configured_value(self):
+        cfg = {'explode': {'distance_mm': 35}}
+        assert explode.lift_distance_mm(cfg) == (35.0, False)
+
+    def test_clamps_low(self):
+        cfg = {'explode': {'distance_mm': 0}}
+        assert explode.lift_distance_mm(cfg) == (1.0, True)
+
+    def test_clamps_high(self):
+        cfg = {'explode': {'distance_mm': 9000}}
+        assert explode.lift_distance_mm(cfg) == (500.0, True)
+
+    def test_non_numeric_falls_back_to_default(self):
+        cfg = {'explode': {'distance_mm': 'banana'}}
+        assert explode.lift_distance_mm(cfg) == (20.0, True)
+
+    def test_mm_to_cm(self):
+        assert explode.mm_to_cm(20) == 2.0
+```
+
+- [ ] **Step 2: Run to verify the new tests fail**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: 6 passed (Task 3), 7 failed with `AttributeError: module 'explode' has no attribute 'lift_distance_mm'`.
+
+- [ ] **Step 3: Append the implementation** to the pure-logic section of `explode.py`:
+
+```python
+DISTANCE_MM_DEFAULT = 20.0
+DISTANCE_MM_MIN = 1.0
+DISTANCE_MM_MAX = 500.0
+
+
+def lift_distance_mm(config):
+    """Lift distance from the config's explode section, clamped to the valid
+    range. Returns (distance_mm, was_adjusted)."""
+    raw = ((config or {}).get('explode') or {}).get('distance_mm', DISTANCE_MM_DEFAULT)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DISTANCE_MM_DEFAULT, True
+    clamped = min(max(value, DISTANCE_MM_MIN), DISTANCE_MM_MAX)
+    return clamped, clamped != value
+
+
+def mm_to_cm(mm):
+    return mm / 10.0
+```
+
+- [ ] **Step 4: Run to verify all pass**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: 13 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add lift distance config parsing.`
+
+---
+
+### Task 5: Axis inference (bucketing cylindrical-face axes)
+
+**Files:**
+- Modify: `explode.py`
+- Modify: `tests/test_explode_logic.py`
+
+Face records are plain dicts: `{'axis': (x,y,z), 'area': float, 'radius': float, 'origin': (x,y,z)}` — the adapter (Task 9) builds them from world-space face proxies.
+
+- [ ] **Step 1: Append the failing tests:**
+
+```python
+def face(axis, area, radius=0.15, origin=(0, 0, 0)):
+    return {'axis': axis, 'area': area, 'radius': radius, 'origin': origin}
+
+
+class TestDominantAxis:
+    def test_no_faces_returns_none(self):
+        assert explode.dominant_axis([]) == (None, [])
+
+    def test_single_face_wins(self):
+        axis, coaxial = explode.dominant_axis([face((0, 0, 1), 2.0)])
+        assert axis == pytest.approx((0, 0, 1))
+        assert len(coaxial) == 1
+
+    def test_largest_summed_area_wins(self):
+        faces = [face((0, 0, 1), 1.0), face((0, 0, 1), 1.0),  # shank + head: 2.0 total
+                 face((1, 0, 0), 1.5)]                          # cross-hole: 1.5
+        axis, coaxial = explode.dominant_axis(faces)
+        assert axis == pytest.approx((0, 0, 1))
+        assert len(coaxial) == 2
+
+    def test_antiparallel_axes_share_a_bucket(self):
+        faces = [face((0, 0, 1), 1.0), face((0, 0, -1), 1.0),
+                 face((1, 0, 0), 1.5)]
+        axis, coaxial = explode.dominant_axis(faces)
+        assert abs(axis[2]) == pytest.approx(1.0)
+        assert len(coaxial) == 2
+
+    def test_within_tolerance_buckets_together(self):
+        tilted = explode.v_norm((math.sin(math.radians(0.5)), 0,
+                                 math.cos(math.radians(0.5))))
+        faces = [face((0, 0, 1), 1.0), face(tilted, 1.0), face((1, 0, 0), 1.5)]
+        axis, _ = explode.dominant_axis(faces)
+        assert axis == pytest.approx((0, 0, 1))
+
+    def test_beyond_tolerance_buckets_apart(self):
+        tilted = explode.v_norm((math.sin(math.radians(3.0)), 0,
+                                 math.cos(math.radians(3.0))))
+        faces = [face((0, 0, 1), 1.0), face(tilted, 1.0), face((1, 0, 0), 1.5)]
+        axis, _ = explode.dominant_axis(faces)
+        assert axis == pytest.approx((1, 0, 0))
+
+    def test_unnormalized_input_axes_are_handled(self):
+        axis, _ = explode.dominant_axis([face((0, 0, 7), 1.0)])
+        assert axis == pytest.approx((0, 0, 1))
+```
+
+- [ ] **Step 2: Run to verify the new tests fail**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -k Dominant -v
+```
+
+Expected: 7 failed with `AttributeError: module 'explode' has no attribute 'dominant_axis'`.
+
+- [ ] **Step 3: Append the implementation:**
+
+```python
+AXIS_BUCKET_TOLERANCE_DEG = 1.0
+
+
+def dominant_axis(faces, tolerance_deg=AXIS_BUCKET_TOLERANCE_DEG):
+    """The fastener's lift axis: bucket cylindrical/conical face axes by
+    direction (antiparallel axes share a bucket) and return the direction with
+    the largest summed face area, plus the faces in that bucket.
+
+    The returned axis is unsigned — which way along it to lift is decided
+    separately. Returns (None, []) when there are no faces.
+    """
+    cos_tol = math.cos(math.radians(tolerance_deg))
+    buckets = []
+    for f in faces:
+        direction = v_norm(f['axis'])
+        for bucket in buckets:
+            if abs(v_dot(direction, bucket['direction'])) >= cos_tol:
+                bucket['area'] += f['area']
+                bucket['faces'].append(f)
+                break
+        else:
+            buckets.append({'direction': direction, 'area': f['area'], 'faces': [f]})
+    if not buckets:
+        return None, []
+    best = max(buckets, key=lambda b: b['area'])
+    return best['direction'], best['faces']
+```
+
+- [ ] **Step 4: Run the full suite**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: 20 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add dominant axis inference.`
+
+---
+
+### Task 6: Sign heuristics (head end, ring rays, final choice)
+
+**Files:**
+- Modify: `explode.py`
+- Modify: `tests/test_explode_logic.py`
+
+- [ ] **Step 1: Append the failing tests:**
+
+```python
+class TestHeadEndSign:
+    def test_head_above_center_gives_positive(self):
+        coaxial = [face((0, 0, 1), 1.0, radius=0.15, origin=(0, 0, -0.5)),   # shank
+                   face((0, 0, 1), 0.5, radius=0.275, origin=(0, 0, 0.15))]  # head OD
+        assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, -0.35)) == 1
+
+    def test_head_below_center_gives_negative(self):
+        coaxial = [face((0, 0, 1), 1.0, radius=0.15, origin=(0, 0, 0.5)),
+                   face((0, 0, 1), 0.5, radius=0.275, origin=(0, 0, -0.15))]
+        assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, 0.35)) == -1
+
+    def test_equal_radii_is_inapplicable(self):
+        coaxial = [face((0, 0, 1), 1.0, radius=0.125, origin=(0, 0, 0))]  # nut bore
+        assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, 0)) is None
+
+    def test_nearly_equal_radii_is_inapplicable(self):
+        coaxial = [face((0, 0, 1), 1.0, radius=0.150, origin=(0, 0, -0.5)),
+                   face((0, 0, 1), 0.5, radius=0.154, origin=(0, 0, 0.15))]
+        assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, -0.35)) is None
+
+    def test_no_coaxial_faces_is_inapplicable(self):
+        # the local-Z fallback path produces no coaxial faces
+        assert explode.head_end_sign([], (0, 0, 1), (0, 0, 0)) is None
+
+
+class TestRingRaySign:
+    def test_material_on_positive_side_lifts_negative(self):
+        assert explode.ring_ray_sign([0.3], [], threshold=2.0) == -1
+
+    def test_material_on_negative_side_lifts_positive(self):
+        assert explode.ring_ray_sign([], [0.3], threshold=2.0) == 1
+
+    def test_material_both_sides_is_ambiguous(self):
+        assert explode.ring_ray_sign([0.3], [0.4], threshold=2.0) is None
+
+    def test_no_material_is_ambiguous(self):
+        assert explode.ring_ray_sign([], [], threshold=2.0) is None
+
+    def test_hits_beyond_threshold_do_not_count(self):
+        assert explode.ring_ray_sign([35.0], [0.3], threshold=2.0) == 1
+
+    def test_hit_exactly_at_threshold_counts(self):
+        assert explode.ring_ray_sign([2.0], [], threshold=2.0) == -1
+
+
+class TestChooseSign:
+    def test_head_sign_wins(self):
+        assert explode.choose_sign(-1, 1) == -1
+
+    def test_ray_sign_breaks_tie(self):
+        assert explode.choose_sign(None, -1) == -1
+
+    def test_fallback_is_positive(self):
+        assert explode.choose_sign(None, None) == 1
+```
+
+- [ ] **Step 2: Run to verify the new tests fail**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -k "HeadEnd or RingRay or ChooseSign" -v
+```
+
+Expected: 14 failed with `AttributeError`.
+
+- [ ] **Step 3: Append the implementation:**
+
+```python
+HEAD_RADIUS_RATIO = 1.05  # head must be at least 5% larger than the shank
+
+
+def head_end_sign(coaxial_faces, axis, body_center):
+    """Sign along axis pointing toward the fastener's larger-diameter (head)
+    end. 'Out' is always toward the head for seated screws, bolts, and flanged
+    inserts. Returns None when inapplicable: no coaxial faces (local-Z
+    fallback) or no distinct head (nuts, dowels, set screws)."""
+    if not coaxial_faces:
+        return None
+    radii = [f['radius'] for f in coaxial_faces]
+    if max(radii) < min(radii) * HEAD_RADIUS_RATIO:
+        return None
+    head_face = max(coaxial_faces, key=lambda f: f['radius'])
+    position = v_dot(v_sub(head_face['origin'], body_center), axis)
+    if position == 0:
+        return None
+    return 1 if position > 0 else -1
+
+
+def ring_ray_sign(hit_distances_pos, hit_distances_neg, threshold):
+    """Sign away from neighboring material found by the ring-ray test.
+    Each argument lists distances of non-fastener hits along +axis/-axis;
+    a side has material when any hit lies within threshold. Returns +1, -1,
+    or None when both or neither side has material."""
+    material_pos = any(d <= threshold for d in hit_distances_pos)
+    material_neg = any(d <= threshold for d in hit_distances_neg)
+    if material_pos == material_neg:
+        return None
+    return -1 if material_pos else 1
+
+
+def choose_sign(head_sign, ray_sign):
+    """Final lift sign: head end wins, ring rays break ties, +axis last."""
+    if head_sign is not None:
+        return head_sign
+    if ray_sign is not None:
+        return ray_sign
+    return 1
+```
+
+- [ ] **Step 4: Run the full suite**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: 34 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add lift sign heuristics.`
+
+---
+
+### Task 7: Ring-ray geometry planning (origins and threshold)
+
+**Files:**
+- Modify: `explode.py`
+- Modify: `tests/test_explode_logic.py`
+
+This keeps the ray *layout* pure and testable; only the actual casting (Task 9) touches Fusion.
+
+- [ ] **Step 1: Append the failing tests:**
+
+```python
+class TestRingRayPlan:
+    def test_ring_radius_between_bore_and_outer_when_radii_distinct(self):
+        assert explode.ring_radius([0.125, 0.31], radial_extent=0.31) == pytest.approx(0.2175)
+
+    def test_ring_radius_falls_back_to_70pct_of_radial_extent(self):
+        assert explode.ring_radius([0.15], radial_extent=0.275) == pytest.approx(0.1925)
+        assert explode.ring_radius([], radial_extent=0.275) == pytest.approx(0.1925)
+
+    def test_threshold_is_max_of_extent_and_lift(self):
+        assert explode.ray_threshold(axial_extent=1.3, lift_cm=2.0) == 2.0
+        assert explode.ray_threshold(axial_extent=3.0, lift_cm=2.0) == 3.0
+
+    def test_ring_origins_layout(self):
+        origins = explode.ring_origins(center=(0, 0, 0), axis=(0, 0, 1),
+                                       axial_half_extent=0.5, ring_r=0.2, count=8)
+        assert len(origins['pos']) == 8
+        assert len(origins['neg']) == 8
+        for p in origins['pos']:
+            assert p[2] == pytest.approx(0.5 + explode.RAY_START_EPSILON_CM)
+            assert math.sqrt(p[0] ** 2 + p[1] ** 2) == pytest.approx(0.2)
+        for p in origins['neg']:
+            assert p[2] == pytest.approx(-0.5 - explode.RAY_START_EPSILON_CM)
+            assert math.sqrt(p[0] ** 2 + p[1] ** 2) == pytest.approx(0.2)
+```
+
+- [ ] **Step 2: Run to verify the new tests fail**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -k RingRayPlan -v
+```
+
+Expected: 4 failed with `AttributeError`.
+
+- [ ] **Step 3: Append the implementation:**
+
+```python
+RING_RAY_COUNT = 8
+RING_RADIUS_FALLBACK_RATIO = 0.7
+RAY_START_EPSILON_CM = 0.05
+
+
+def ring_radius(coaxial_radii, radial_extent):
+    """Radial offset for ring-ray origins: midway between bore and outer
+    radius when the coaxial faces provide distinct radii, otherwise 70% of
+    the body's maximal radial extent. Targets the seat face annulus rather
+    than the clearance-hole void a center ray would sail down."""
+    distinct = sorted(set(coaxial_radii))
+    if len(distinct) >= 2:
+        return (distinct[0] + distinct[-1]) / 2.0
+    return radial_extent * RING_RADIUS_FALLBACK_RATIO
+
+
+def ray_threshold(axial_extent, lift_cm):
+    """A ray hit counts as neighboring material only within this distance."""
+    return max(axial_extent, lift_cm)
+
+
+def ring_origins(center, axis, axial_half_extent, ring_r, count=RING_RAY_COUNT):
+    """Ray start points just outside the body's axial extents, arranged in a
+    ring around the axis. Returns {'pos': [...], 'neg': [...]} — origins for
+    rays traveling along +axis and -axis respectively, away from the body."""
+    u, w = perpendicular_basis(axis)
+    out = {'pos': [], 'neg': []}
+    for side, key in ((1, 'pos'), (-1, 'neg')):
+        base = v_scale(axis, side * (axial_half_extent + RAY_START_EPSILON_CM))
+        for k in range(count):
+            angle = 2.0 * math.pi * k / count
+            radial = v_scale(u, ring_r * math.cos(angle))
+            radial = (radial[0] + w[0] * ring_r * math.sin(angle),
+                      radial[1] + w[1] * ring_r * math.sin(angle),
+                      radial[2] + w[2] * ring_r * math.sin(angle))
+            out[key].append((center[0] + base[0] + radial[0],
+                             center[1] + base[1] + radial[1],
+                             center[2] + base[2] + radial[2]))
+    return out
+```
+
+- [ ] **Step 4: Run the full suite**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
+```
+
+Expected: 38 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add ring-ray layout planning.`
+
+---
+
+### Task 8: Fusion adapters — module state, logging, selection resolution
+
+**Files:**
+- Modify: `explode.py`
+
+Adapter code can't run under pytest (no `adsk`); it is exercised by the integration script (Task 12) and validated by the spike findings (Task 2). Append everything below to `explode.py` under a clearly separated section.
+
+- [ ] **Step 1: Append module state, constants, and logging:**
+
+```python
+# ---------------------------------------------------------------------------
+# Fusion adapters — everything below touches adsk and runs only inside Fusion.
+# ---------------------------------------------------------------------------
+
+ATTR_GROUP = 'FusionDocumentationToolkit'
+ATTR_COPY = 'explodedCopy'
+ATTR_ORIGINAL = 'explodedOriginal'
+LOG_PREFIX = '[ExplodeFasteners] '
+
+EXPLODE_CMD_ID = 'ExplodeFastenersCmd'
+EXPLODE_CMD_NAME = 'Explode Fasteners'
+EXPLODE_CMD_DESCRIPTION = ('Copy the selected fasteners out along their insertion axes '
+                           'and hide the originals, for empty-hole documentation shots.')
+RESTORE_CMD_ID = 'RestoreFastenersCmd'
+RESTORE_CMD_NAME = 'Restore Fasteners'
+RESTORE_CMD_DESCRIPTION = 'Delete all exploded fastener copies and unhide the originals.'
+FLIP_CMD_ID = 'FlipLastExplodeCmd'
+FLIP_CMD_NAME = 'Flip Last Explode'
+FLIP_CMD_DESCRIPTION = 'Re-lift the most recent explode batch in the opposite direction.'
+
+_app = None
+_ui = None
+_config = None
+_handlers = []
+_pending_selection = []
+_last_batch = None  # {'doc_token': str, 'items': [{'token','axis','sign','distance_cm'}]}
+
+
+def init(app, ui, config):
+    """Wire the module to the running add-in. Called from run()."""
+    global _app, _ui, _config, _pending_selection, _last_batch
+    _app = app
+    _ui = ui
+    _config = config
+    _pending_selection = []
+    _last_batch = None
+
+
+def log(message):
+    if _app:
+        try:
+            _app.log(LOG_PREFIX + message)
+        except Exception:
+            pass
+
+
+def active_design():
+    return adsk.fusion.Design.cast(_app.activeProduct)
+
+
+def occurrence_label(occ):
+    try:
+        return occ.fullPathName
+    except Exception:
+        return '(unnamed occurrence)'
+```
+
+- [ ] **Step 2: Append tag inspection and selection resolution** (mechanism validated by spike Finding 3):
+
+```python
+def has_tag(occ, attr_name):
+    try:
+        return occ.attributes.itemByName(ATTR_GROUP, attr_name) is not None
+    except Exception:
+        return False
+
+
+def resolve_to_occurrences(entities, root):
+    """Map raw selection entities (occurrences, or face/body proxies from
+    canvas picks) to the deepest occurrences owning them, deduped and with
+    already-exploded items filtered out. Returns (occurrences, skipped) where
+    skipped is a list of (label, reason) for palette logging."""
+    occurrences = []
+    skipped = []
+    seen_tokens = set()
+    for ent in entities:
+        occ = adsk.fusion.Occurrence.cast(ent)
+        if not occ:
+            body = None
+            face = adsk.fusion.BRepFace.cast(ent)
+            if face:
+                body = face.body
+            else:
+                body = adsk.fusion.BRepBody.cast(ent)
+            if not body:
+                skipped.append((str(ent.objectType), 'not an occurrence or body pick'))
+                continue
+            native = body.nativeObject if body.assemblyContext else body
+            comp = native.parentComponent
+            if comp == root:
+                skipped.append((body.name, 'root-component geometry, no occurrence'))
+                continue
+            candidates = root.allOccurrencesByComponent(comp)
+            occ = None
+            for i in range(candidates.count):
+                cand = candidates.item(i)
+                for j in range(cand.bRepBodies.count):
+                    if cand.bRepBodies.item(j).entityToken == body.entityToken:
+                        occ = cand
+                        break
+                if occ:
+                    break
+            if not occ:
+                skipped.append((body.name, 'could not resolve owning occurrence'))
+                continue
+        if occ.entityToken in seen_tokens:
+            continue
+        if has_tag(occ, ATTR_COPY):
+            skipped.append((occurrence_label(occ), 'is an exploded copy'))
+            continue
+        if has_tag(occ, ATTR_ORIGINAL):
+            skipped.append((occurrence_label(occ), 'already exploded'))
+            continue
+        seen_tokens.add(occ.entityToken)
+        occurrences.append(occ)
+    return occurrences, skipped
+```
+
+- [ ] **Step 3: Sanity-check the file still imports cleanly without Fusion**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
+```
+
+Expected: `import ok`, 38 passed.
+
+- [ ] **Step 4: Checkpoint — ask Erik to review and commit.** Suggested message: `Add explode module state and selection resolution.`
+
+---
+
+### Task 9: Fusion adapters — geometry extraction and ray casting
+
+**Files:**
+- Modify: `explode.py`
+
+- [ ] **Step 1: Append face extraction and body measurements:**
+
+```python
+def axis_faces(occ):
+    """Face records for the pure inference functions, from the occurrence's
+    bodies in world space (proxies). Cylinders and cones only."""
+    records = []
+    for i in range(occ.bRepBodies.count):
+        body = occ.bRepBodies.item(i)
+        for j in range(body.faces.count):
+            f = body.faces.item(j)
+            geom = f.geometry
+            if geom.surfaceType == adsk.core.SurfaceTypes.CylinderSurfaceType:
+                axis, radius = geom.axis, geom.radius
+            elif geom.surfaceType == adsk.core.SurfaceTypes.ConeSurfaceType:
+                axis, radius = geom.axis, geom.radius
+            else:
+                continue
+            records.append({'axis': (axis.x, axis.y, axis.z),
+                            'area': f.area,
+                            'radius': radius,
+                            'origin': (geom.origin.x, geom.origin.y, geom.origin.z)})
+    return records
+
+
+def body_metrics(occ, axis):
+    """(center, axial_half_extent, radial_extent) of the occurrence's combined
+    body bounding boxes, measured against the lift axis. Bounding boxes are
+    world-aligned so this is an approximation — good enough for ray layout."""
+    corners = []
+    for i in range(occ.bRepBodies.count):
+        bb = occ.bRepBodies.item(i).boundingBox
+        lo, hi = bb.minPoint, bb.maxPoint
+        for x in (lo.x, hi.x):
+            for y in (lo.y, hi.y):
+                for z in (lo.z, hi.z):
+                    corners.append((x, y, z))
+    center = (sum(c[0] for c in corners) / len(corners),
+              sum(c[1] for c in corners) / len(corners),
+              sum(c[2] for c in corners) / len(corners))
+    axial = [v_dot(v_sub(c, center), axis) for c in corners]
+    radial = []
+    for c in corners:
+        rel = v_sub(c, center)
+        along = v_scale(axis, v_dot(rel, axis))
+        radial.append(math.sqrt(v_dot(v_sub(rel, along), v_sub(rel, along))))
+    return center, max(abs(a) for a in axial), max(radial)
+```
+
+- [ ] **Step 2: Append ray casting:**
+
+```python
+def cast_side_rays(root, occ, origins, direction):
+    """Distances of non-fastener body hits for rays from each origin along
+    direction. Hidden entities are not hit (findBRepUsingRay honors
+    visibility) — acceptable because all inference runs before this command
+    hides anything."""
+    own_tokens = set()
+    for i in range(occ.bRepBodies.count):
+        own_tokens.add(occ.bRepBodies.item(i).entityToken)
+    direction_v = adsk.core.Vector3D.create(*direction)
+    distances = []
+    for origin in origins:
+        origin_p = adsk.core.Point3D.create(*origin)
+        hit_points = adsk.core.ObjectCollection.create()
+        entities = root.findBRepUsingRay(
+            origin_p, direction_v,
+            adsk.fusion.BRepEntityTypes.BRepBodyEntityType,
+            -1.0, True, hit_points)
+        for k in range(entities.count):
+            body = adsk.fusion.BRepBody.cast(entities.item(k))
+            if body and body.entityToken in own_tokens:
+                continue
+            distances.append(origin_p.distanceTo(hit_points.item(k)))
+    return distances
+
+
+def infer_lift_vector(occ, root, distance_cm):
+    """The full Phase-A decision for one occurrence: (axis, sign) or
+    (None, reason) when no axis can be inferred."""
+    faces = axis_faces(occ)
+    axis, coaxial = dominant_axis(faces)
+    if axis is None:
+        m = occ.transform2
+        z = (m.getCell(0, 2), m.getCell(1, 2), m.getCell(2, 2))
+        if v_dot(z, z) == 0:
+            return None, 'no cylindrical faces and degenerate transform'
+        axis = v_norm(z)
+        coaxial = []
+    center, axial_half_extent, radial_extent = body_metrics(occ, axis)
+    sign = head_end_sign(coaxial, axis, center)
+    if sign is None:
+        radii = [f['radius'] for f in coaxial]
+        ring_r = ring_radius(radii, radial_extent)
+        origins = ring_origins(center, axis, axial_half_extent, ring_r)
+        threshold = ray_threshold(axial_half_extent * 2.0, distance_cm)
+        hits_pos = cast_side_rays(root, occ, origins['pos'], axis)
+        hits_neg = cast_side_rays(root, occ, origins['neg'], v_scale(axis, -1.0))
+        sign = choose_sign(None, ring_ray_sign(hits_pos, hits_neg, threshold))
+    return (axis, sign), None
+```
+
+- [ ] **Step 3: Sanity-check imports and tests**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
+```
+
+Expected: `import ok`, 38 passed.
+
+- [ ] **Step 4: Checkpoint — ask Erik to review and commit.** Suggested message: `Add geometry extraction and ray casting adapters.`
+
+---
+
+### Task 10: Explode, restore, and flip engines
+
+**Files:**
+- Modify: `explode.py`
+
+- [ ] **Step 1: Append the explode engine** (two-phase per the spec — all inference before any mutation):
+
+```python
+def timeline_at_end(design):
+    """False only in parametric mode with the marker rolled back — API
+    operations would land mid-history."""
+    if design.designType != adsk.fusion.DesignTypes.ParametricDesignType:
+        return True
+    timeline = design.timeline
+    return timeline.markerPosition == timeline.count
+
+
+def lifted_transform(occ, axis, sign, distance_cm):
+    """Root-space creation transform for the copy: the original's world
+    transform translated by sign * axis * distance."""
+    m = occ.transform2.copy()
+    t = m.translation
+    offset = v_scale(axis, sign * distance_cm)
+    t.x += offset[0]
+    t.y += offset[1]
+    t.z += offset[2]
+    m.translation = t
+    return m
+
+
+def create_lifted_copy(design, occ, axis, sign, distance_cm):
+    """Phase-B mutation for one fastener: copy into root at the lifted
+    position, tag both occurrences, hide the original. Returns the copy or
+    None on failure."""
+    root = design.rootComponent
+    copy_occ = root.occurrences.addExistingComponent(
+        occ.component, lifted_transform(occ, axis, sign, distance_cm))
+    if not copy_occ:
+        return None
+    copy_occ.attributes.add(ATTR_GROUP, ATTR_COPY, occ.entityToken)
+    occ.attributes.add(ATTR_GROUP, ATTR_ORIGINAL, '1')
+    occ.isLightBulbOn = False
+    return copy_occ
+
+
+def explode_occurrences(occurrences, distance_cm, design):
+    """Explode a batch: infer axis+sign for every occurrence against the
+    untouched scene (Phase A), then create copies, tag, and hide (Phase B).
+    Returns (exploded_count, skipped) where skipped is [(label, reason)]."""
+    global _last_batch
+    root = design.rootComponent
+    plans = []
+    skipped = []
+    for occ in occurrences:
+        result, reason = infer_lift_vector(occ, root, distance_cm)
+        if result is None:
+            skipped.append((occurrence_label(occ), reason))
+            continue
+        axis, sign = result
+        plans.append({'occ': occ, 'axis': axis, 'sign': sign})
+    if not plans:
+        return 0, skipped
+
+    items = []
+    for plan in plans:
+        copy_occ = create_lifted_copy(design, plan['occ'], plan['axis'],
+                                      plan['sign'], distance_cm)
+        if not copy_occ:
+            skipped.append((occurrence_label(plan['occ']), 'copy creation failed'))
+            continue
+        items.append({'token': plan['occ'].entityToken,
+                      'axis': plan['axis'],
+                      'sign': plan['sign'],
+                      'distance_cm': distance_cm})
+    if items:
+        _last_batch = {'doc_token': root.entityToken, 'items': items}
+    return len(items), skipped
+```
+
+- [ ] **Step 2: Append the restore engine:**
+
+```python
+def find_tagged_attributes(design, attr_name):
+    attrs = design.findAttributes(ATTR_GROUP, attr_name)
+    return attrs if attrs else []
+
+
+def resolve_token(design, token):
+    entities = design.findEntityByToken(token)
+    if entities and len(entities) > 0:
+        return adsk.fusion.Occurrence.cast(entities[0])
+    return None
+
+
+def restore_all(design):
+    """Delete every tagged copy and unhide every tagged original, across all
+    outstanding batches from any session. Returns the restored copy count."""
+    global _last_batch
+    restored = 0
+    for attr in find_tagged_attributes(design, ATTR_COPY):
+        copy_occ = adsk.fusion.Occurrence.cast(attr.parent) if attr.parent else None
+        original = resolve_token(design, attr.value)
+        if original:
+            original.isLightBulbOn = True
+        else:
+            log('Restore: original for one copy no longer exists; deleting copy anyway')
+        if copy_occ:
+            copy_occ.deleteMe()
+            restored += 1
+    for attr in find_tagged_attributes(design, ATTR_ORIGINAL):
+        original = adsk.fusion.Occurrence.cast(attr.parent) if attr.parent else None
+        if original:
+            original.isLightBulbOn = True
+        attr.deleteMe()
+    _last_batch = None
+    return restored
+```
+
+- [ ] **Step 3: Append the flip engine** (delete-and-re-explode with negated sign, per the spec — never a transform edit):
+
+```python
+def flip_last_batch(design):
+    """Mirror the most recent batch to the other side of its parts. Returns
+    (flipped_count, reason) — reason is set when nothing could be flipped."""
+    global _last_batch
+    root = design.rootComponent
+    if not _last_batch:
+        return 0, 'no explode batch this session'
+    if _last_batch['doc_token'] != root.entityToken:
+        return 0, 'last explode batch belongs to a different document'
+
+    copies_by_original = {}
+    for attr in find_tagged_attributes(design, ATTR_COPY):
+        if attr.parent:
+            copies_by_original[attr.value] = adsk.fusion.Occurrence.cast(attr.parent)
+
+    surviving = []
+    flipped = 0
+    for item in _last_batch['items']:
+        original = resolve_token(design, item['token'])
+        if not original:
+            log('Flip: original no longer resolves; dropping batch entry')
+            continue
+        old_copy = copies_by_original.get(item['token'])
+        if old_copy:
+            old_copy.deleteMe()
+        else:
+            log('Flip: copy for {} was missing; recreating'.format(occurrence_label(original)))
+        item['sign'] = -item['sign']
+        new_copy = create_lifted_copy(design, original, item['axis'],
+                                      item['sign'], item['distance_cm'])
+        if new_copy:
+            flipped += 1
+            surviving.append(item)
+    _last_batch['items'] = surviving
+    if not surviving:
+        _last_batch = None
+    return flipped, None
+```
+
+Note: `create_lifted_copy` re-tags the original (`attributes.add` overwrites the same-named attribute) and re-asserts `isLightBulbOn = False`, which covers the spec's flip-after-stray-undo case.
+
+- [ ] **Step 4: Sanity-check imports and tests**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
+```
+
+Expected: `import ok`, 38 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add explode, restore, and flip engines.`
+
+---
+
+### Task 11: Command handlers and main-file registration
+
+**Files:**
+- Modify: `explode.py`
+- Modify: `erikbuild-FusionDocumentationToolkit.py:4-11` (imports), `:409-454` (run), `:457-479` (stop)
+- Modify: `config.json`
+- Create: `resources/explodeFasteners/`, `resources/restoreFasteners/`, `resources/flipExplode/` (placeholder icons)
+
+- [ ] **Step 1: Append the command handlers** to `explode.py`:
+
+```python
+class ExplodeCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    """Captures the user's pre-selection before Fusion clears it, then defers
+    all work to execute. isAutoExecute keeps the command dialog-free so a
+    hotkey press fires instantly (mirrors the Capture Image pattern)."""
+
+    def notify(self, args):
+        global _pending_selection
+        try:
+            cmd = args.command
+            try:
+                cmd.isAutoExecute = True
+            except AttributeError:
+                pass
+            cmd.isExecutedWhenPreEmpted = False
+            _pending_selection = []
+            selections = _ui.activeSelections
+            for i in range(selections.count):
+                _pending_selection.append(selections.item(i).entity)
+            on_execute = ExplodeExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            if _ui:
+                _ui.messageBox('Explode setup failed:\n{}'.format(traceback.format_exc()))
+
+
+class ExplodeExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            design = active_design()
+            if not design:
+                _ui.messageBox('Open a design before exploding fasteners.')
+                return
+            if not timeline_at_end(design):
+                _ui.messageBox('Move the timeline marker to the end before exploding fasteners.')
+                return
+            if not _pending_selection:
+                _ui.messageBox('Select one or more fasteners first.')
+                return
+            occurrences, skipped = resolve_to_occurrences(
+                _pending_selection, design.rootComponent)
+            distance_mm, adjusted = lift_distance_mm(_config)
+            if adjusted:
+                log('Configured explode.distance_mm was invalid; using {}mm'.format(distance_mm))
+            exploded, engine_skipped = explode_occurrences(
+                occurrences, mm_to_cm(distance_mm), design)
+            for label, reason in skipped + engine_skipped:
+                log('Skipped {}: {}'.format(label, reason))
+            if exploded:
+                log('Exploded {} fastener(s) by {}mm'.format(exploded, distance_mm))
+            else:
+                _ui.messageBox('Nothing to explode: all selected items were skipped '
+                               '(see Text Commands palette).')
+        except Exception:
+            if _ui:
+                _ui.messageBox('Explode failed:\n{}'.format(traceback.format_exc()))
+
+
+class RestoreCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            try:
+                cmd.isAutoExecute = True
+            except AttributeError:
+                pass
+            cmd.isExecutedWhenPreEmpted = False
+            on_execute = RestoreExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            if _ui:
+                _ui.messageBox('Restore setup failed:\n{}'.format(traceback.format_exc()))
+
+
+class RestoreExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            design = active_design()
+            if not design:
+                _ui.messageBox('Open a design before restoring fasteners.')
+                return
+            if not timeline_at_end(design):
+                _ui.messageBox('Move the timeline marker to the end before restoring fasteners.')
+                return
+            restored = restore_all(design)
+            if restored:
+                log('Restored {} fastener(s)'.format(restored))
+            else:
+                log('Restore: nothing to restore')
+        except Exception:
+            if _ui:
+                _ui.messageBox('Restore failed:\n{}'.format(traceback.format_exc()))
+
+
+class FlipCreatedHandler(adsk.core.CommandCreatedEventHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            try:
+                cmd.isAutoExecute = True
+            except AttributeError:
+                pass
+            cmd.isExecutedWhenPreEmpted = False
+            on_execute = FlipExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            if _ui:
+                _ui.messageBox('Flip setup failed:\n{}'.format(traceback.format_exc()))
+
+
+class FlipExecuteHandler(adsk.core.CommandEventHandler):
+    def notify(self, args):
+        try:
+            design = active_design()
+            if not design:
+                _ui.messageBox('Open a design before flipping.')
+                return
+            if not timeline_at_end(design):
+                _ui.messageBox('Move the timeline marker to the end before flipping.')
+                return
+            flipped, reason = flip_last_batch(design)
+            if flipped:
+                log('Flipped {} fastener(s)'.format(flipped))
+            else:
+                log('Flip: nothing to flip ({})'.format(reason))
+        except Exception:
+            if _ui:
+                _ui.messageBox('Flip failed:\n{}'.format(traceback.format_exc()))
+```
+
+Also add `import traceback` to the imports at the top of `explode.py` (next to `import math`).
+
+- [ ] **Step 2: Wire the module into the main file.** In `erikbuild-FusionDocumentationToolkit.py`:
+
+(a) After the existing imports (line 10, after `import zlib`), add:
+
+```python
+import sys
+import importlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import explode
+```
+
+(b) In `run()`, immediately after `init_capture_defaults()` (line 419), add:
+
+```python
+        importlib.reload(explode)
+        explode.init(_app, _ui, _config)
+```
+
+(c) Change the `purge_stale_controls` call in `run()` (line 421) to include the new command IDs:
+
+```python
+        purge_stale_controls((CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID,
+                              explode.EXPLODE_CMD_ID, explode.RESTORE_CMD_ID,
+                              explode.FLIP_CMD_ID))
+```
+
+(d) After the third `register_command` call in `run()` (line 450), add:
+
+```python
+        register_command(panel, explode.EXPLODE_CMD_ID, explode.EXPLODE_CMD_NAME,
+                         explode.EXPLODE_CMD_DESCRIPTION,
+                         os.path.join(resources_root, 'explodeFasteners'),
+                         explode.ExplodeCreatedHandler())
+        register_command(panel, explode.RESTORE_CMD_ID, explode.RESTORE_CMD_NAME,
+                         explode.RESTORE_CMD_DESCRIPTION,
+                         os.path.join(resources_root, 'restoreFasteners'),
+                         explode.RestoreCreatedHandler())
+        register_command(panel, explode.FLIP_CMD_ID, explode.FLIP_CMD_NAME,
+                         explode.FLIP_CMD_DESCRIPTION,
+                         os.path.join(resources_root, 'flipExplode'),
+                         explode.FlipCreatedHandler())
+```
+
+(e) In `stop()`, change the `cmd_ids` tuple (line 460) to:
+
+```python
+        cmd_ids = (CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID,
+                   explode.EXPLODE_CMD_ID, explode.RESTORE_CMD_ID,
+                   explode.FLIP_CMD_ID)
+```
+
+- [ ] **Step 3: Add the config section.** In `config.json`, after the `"capture"` object's closing brace (line 15), insert:
+
+```json
+    "explode": {
+        "distance_mm": 20
+    },
+```
+
+- [ ] **Step 4: Create placeholder icons** (proper artwork later via the PSD workflow in `design/`):
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && cp -r resources/capture resources/explodeFasteners && cp -r resources/capture resources/restoreFasteners && cp -r resources/capture resources/flipExplode
+```
+
+- [ ] **Step 5: Verify everything still imports and config parses**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import json; json.load(open('config.json')); print('config ok')" && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
+```
+
+Expected: `config ok`, `import ok`, 38 passed.
+
+- [ ] **Step 6 [FUSION — Erik runs]: Smoke test.** Re-run the add-in (Utilities → Add-Ins → stop, then Run). Confirm: three new buttons appear on the DOCUMENTATION panel; clicking Restore in an empty design logs `[ExplodeFasteners] Restore: nothing to restore` to the palette; nothing crashes. Report back.
+
+- [ ] **Step 7: Checkpoint — ask Erik to review and commit.** Suggested message: `Wire explode commands into the add-in.`
+
+---
+
+### Task 12: In-Fusion integration test (fixture builder + assertions)
+
+**Files:**
+- Create: `tests/fusion_integration/ExplodeIntegrationTest.py`
+- Create: `tests/fusion_integration/ExplodeIntegrationTest.manifest`
+
+The script builds its own fixture (plate with a through-hole screw+nut pair and a nested screw in a blind hole), exercises explode → flip → restore through the engine functions, and reports PASS/FAIL per assertion to the palette. It closes the fixture without saving.
+
+- [ ] **Step 1: Write the manifest** at `tests/fusion_integration/ExplodeIntegrationTest.manifest`:
+
+```json
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "scriptType": "python",
+    "description": "Integration tests for the explode-fasteners feature."
+}
+```
+
+- [ ] **Step 2: Write the test script** at `tests/fusion_integration/ExplodeIntegrationTest.py`:
+
+```python
+# ABOUTME: Self-contained in-Fusion integration test for the explode feature —
+# ABOUTME: builds a fixture assembly, runs explode/flip/restore, asserts results.
+import math
+import os
+import sys
+import traceback
+
+import adsk.core
+import adsk.fusion
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, REPO_ROOT)
+import explode  # noqa: E402
+
+_results = []
+
+
+def check(condition, label):
+    _results.append((bool(condition), label))
+
+
+def report(app):
+    failures = [label for ok, label in _results if not ok]
+    for ok, label in _results:
+        app.log('[ExplodeTest] {} {}'.format('PASS' if ok else 'FAIL', label))
+    app.log('[ExplodeTest] ==== {} passed, {} failed ===='.format(
+        len(_results) - len(failures), len(failures)))
+
+
+def extrude_profile(component, profile, distance_cm, operation):
+    extrudes = component.features.extrudeFeatures
+    inp = extrudes.createInput(profile, operation)
+    inp.setDistanceExtent(False, adsk.core.ValueInput.createByReal(distance_cm))
+    return extrudes.add(inp)
+
+
+def build_plate(root):
+    """6x4x0.5cm plate on the XY plane, top face at z=0.5, with two 0.17cm-radius
+    through holes at x=+/-1.5 and one 0.14cm-radius blind hole (0.4 deep) at x=0."""
+    sketch = root.sketches.add(root.xYConstructionPlane)
+    sketch.sketchCurves.sketchLines.addTwoPointRectangle(
+        adsk.core.Point3D.create(-3, -2, 0), adsk.core.Point3D.create(3, 2, 0))
+    plate_profile = sketch.profiles.item(0)
+    extrude_profile(root, plate_profile, 0.5,
+                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+    hole_sketch = root.sketches.add(root.xYConstructionPlane)
+    circles = hole_sketch.sketchCurves.sketchCircles
+    circles.addByCenterRadius(adsk.core.Point3D.create(-1.5, 0, 0), 0.17)
+    circles.addByCenterRadius(adsk.core.Point3D.create(1.5, 0, 0), 0.17)
+    for i in range(hole_sketch.profiles.count):
+        extrude_profile(root, hole_sketch.profiles.item(i), 0.5,
+                        adsk.fusion.FeatureOperations.CutFeatureOperation)
+
+    blind_sketch = root.sketches.add(root.xYConstructionPlane)
+    # sketch on z=0 cutting upward into the plate from below is awkward; cut from
+    # the top instead: offset construction plane at the plate top.
+    planes = root.constructionPlanes
+    plane_input = planes.createInput()
+    plane_input.setByOffset(root.xYConstructionPlane, adsk.core.ValueInput.createByReal(0.5))
+    top_plane = planes.add(plane_input)
+    blind_sketch = root.sketches.add(top_plane)
+    blind_sketch.sketchCurves.sketchCircles.addByCenterRadius(
+        adsk.core.Point3D.create(0, 0, 0), 0.14)
+    extrude_profile(root, blind_sketch.profiles.item(0), -0.4,
+                    adsk.fusion.FeatureOperations.CutFeatureOperation)
+
+
+def build_screw(parent_occurrences, name, world_x, head_top_z):
+    """Simplified SHCS: shank r0.15 x 1.0 long pointing -Z from z=0, head r0.275
+    x 0.3 tall above. Seated so the head sits on the plate top (head bottom at
+    z = head_top_z - 0.3)."""
+    t = adsk.core.Matrix3D.create()
+    occ = parent_occurrences.addNewComponent(t)
+    comp = occ.component
+    comp.name = name
+
+    shank_sketch = comp.sketches.add(comp.xYConstructionPlane)
+    shank_sketch.sketchCurves.sketchCircles.addByCenterRadius(
+        adsk.core.Point3D.create(0, 0, 0), 0.15)
+    extrude_profile(comp, shank_sketch.profiles.item(0), -1.0,
+                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+    head_sketch = comp.sketches.add(comp.xYConstructionPlane)
+    head_sketch.sketchCurves.sketchCircles.addByCenterRadius(
+        adsk.core.Point3D.create(0, 0, 0), 0.275)
+    extrude_profile(comp, head_sketch.profiles.item(0), 0.3,
+                    adsk.fusion.FeatureOperations.JoinFeatureOperation)
+
+    seat = adsk.core.Matrix3D.create()
+    seat.translation = adsk.core.Vector3D.create(world_x, 0, head_top_z - 0.3)
+    occ.transform2 = seat
+    return occ
+
+
+def build_square_nut(parent_occurrences, world_x, top_z):
+    """0.55cm square nut, 0.24 thick, 0.125-radius bore, top face at top_z."""
+    t = adsk.core.Matrix3D.create()
+    occ = parent_occurrences.addNewComponent(t)
+    comp = occ.component
+    comp.name = 'SquareNut'
+
+    sketch = comp.sketches.add(comp.xYConstructionPlane)
+    sketch.sketchCurves.sketchLines.addTwoPointRectangle(
+        adsk.core.Point3D.create(-0.275, -0.275, 0),
+        adsk.core.Point3D.create(0.275, 0.275, 0))
+    sketch.sketchCurves.sketchCircles.addByCenterRadius(
+        adsk.core.Point3D.create(0, 0, 0), 0.125)
+    ring_profile = None
+    for i in range(sketch.profiles.count):
+        if sketch.profiles.item(i).profileLoops.count == 2:
+            ring_profile = sketch.profiles.item(i)
+    extrude_profile(comp, ring_profile, -0.24,
+                    adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+
+    seat = adsk.core.Matrix3D.create()
+    seat.translation = adsk.core.Vector3D.create(world_x, 0, top_z)
+    occ.transform2 = seat
+    return occ
+
+
+def world_z(occ):
+    return occ.transform2.translation.z
+
+
+def run(context):
+    app = adsk.core.Application.get()
+    ui = app.userInterface
+    try:
+        doc = app.documents.add(adsk.core.DocumentTypes.FusionDesignDocumentType)
+        design = adsk.fusion.Design.cast(app.activeProduct)
+        root = design.rootComponent
+        explode.init(app, ui, {'explode': {'distance_mm': 20}})
+
+        build_plate(root)
+        # screw1 through hole at x=-1.5, head on plate top (z=0.5)
+        screw1 = build_screw(root.occurrences, 'Screw1', -1.5, 0.8)
+        # square nut under the same hole, coaxial with screw1, top face on plate bottom
+        nut = build_square_nut(root.occurrences, -1.5, 0.0)
+        # subassembly at x=+1.5 containing a nested screw seated in the blind... the
+        # blind hole is at x=0; place the subassembly so its inner screw lands at x=0.
+        sub_t = adsk.core.Matrix3D.create()
+        sub_t.translation = adsk.core.Vector3D.create(1.5, 0, 0)
+        sub_occ = root.occurrences.addNewComponent(sub_t)
+        sub_occ.component.name = 'SubAssembly'
+        nested_screw_native = build_screw(sub_occ.component.occurrences, 'Screw2', -1.5, 0.8)
+
+        # root-context proxy for the nested screw
+        screw2 = None
+        for i in range(root.allOccurrences.count):
+            o = root.allOccurrences.item(i)
+            if o.component.name == 'Screw2':
+                screw2 = o
+        check(screw2 is not None, 'fixture: nested screw proxy found')
+
+        timeline_before = design.timeline.count
+
+        # --- selection resolution: a body proxy resolves to the deepest occurrence ---
+        resolved, skipped = explode.resolve_to_occurrences(
+            [screw2.bRepBodies.item(0)], root)
+        check(len(resolved) == 1 and resolved[0].entityToken == screw2.entityToken,
+              'resolution: nested body proxy -> deepest occurrence')
+
+        # --- explode the batch: screw1 + nut + nested screw2 ---
+        z_screw1, z_nut, z_screw2 = world_z(screw1), world_z(nut), world_z(screw2)
+        count, eng_skipped = explode.explode_occurrences(
+            [screw1, nut, screw2], 2.0, design)
+        check(count == 3, 'explode: all three fasteners exploded (got {})'.format(count))
+        check(len(eng_skipped) == 0, 'explode: nothing skipped')
+
+        copies = explode.find_tagged_attributes(design, explode.ATTR_COPY)
+        check(len(copies) == 3, 'explode: three tagged copies exist')
+        check(not screw1.isLightBulbOn and not nut.isLightBulbOn and not screw2.isLightBulbOn,
+              'explode: originals hidden')
+
+        by_original = {}
+        for attr in copies:
+            by_original[attr.value] = adsk.fusion.Occurrence.cast(attr.parent)
+        copy_s1 = by_original[screw1.entityToken]
+        copy_nut = by_original[nut.entityToken]
+        copy_s2 = by_original[screw2.entityToken]
+        check(abs(world_z(copy_s1) - (z_screw1 + 2.0)) < 1e-5,
+              'explode: screw1 head-up lift is +Z by 2.0 (got dz={:.4f})'.format(
+                  world_z(copy_s1) - z_screw1))
+        check(abs(world_z(copy_nut) - (z_nut - 2.0)) < 1e-5,
+              'explode: nut lifts -Z, opposite its coaxial screw (got dz={:.4f})'.format(
+                  world_z(copy_nut) - z_nut))
+        check(abs(world_z(copy_s2) - (z_screw2 + 2.0)) < 1e-5,
+              'explode: nested screw lifts +Z (got dz={:.4f})'.format(
+                  world_z(copy_s2) - z_screw2))
+        check(copy_s2.assemblyContext is None,
+              'explode: nested screw copy landed in root')
+
+        # --- double explode is skipped (the guard lives in resolve_to_occurrences,
+        # which is what the command handler feeds the engine from) ---
+        resolved2, skipped2 = explode.resolve_to_occurrences([screw1], root)
+        check(len(resolved2) == 0 and len(skipped2) == 1 and skipped2[0][1] == 'already exploded',
+              'double explode: resolution skips tagged original')
+
+        # --- flip mirrors the batch ---
+        flipped, reason = explode.flip_last_batch(design)
+        check(flipped == 3, 'flip: all three flipped (got {}, reason={})'.format(flipped, reason))
+        copies_after_flip = explode.find_tagged_attributes(design, explode.ATTR_COPY)
+        by_original = {}
+        for attr in copies_after_flip:
+            by_original[attr.value] = adsk.fusion.Occurrence.cast(attr.parent)
+        check(abs(world_z(by_original[screw1.entityToken]) - (z_screw1 - 2.0)) < 1e-5,
+              'flip: screw1 copy now at -Z offset')
+        flipped_back, _ = explode.flip_last_batch(design)
+        check(flipped_back == 3, 'flip: second flip returns to first guess')
+        by_original = {}
+        for attr in explode.find_tagged_attributes(design, explode.ATTR_COPY):
+            by_original[attr.value] = adsk.fusion.Occurrence.cast(attr.parent)
+        check(abs(world_z(by_original[screw1.entityToken]) - (z_screw1 + 2.0)) < 1e-5,
+              'flip: copy back at +Z offset')
+
+        # --- restore ---
+        restored = explode.restore_all(design)
+        check(restored == 3, 'restore: three copies removed (got {})'.format(restored))
+        check(len(explode.find_tagged_attributes(design, explode.ATTR_COPY)) == 0,
+              'restore: no copy tags remain')
+        check(len(explode.find_tagged_attributes(design, explode.ATTR_ORIGINAL)) == 0,
+              'restore: no original tags remain')
+        check(screw1.isLightBulbOn and nut.isLightBulbOn and screw2.isLightBulbOn,
+              'restore: originals visible again')
+        check(design.timeline.count == timeline_before,
+              'restore: timeline back to pre-explode count ({} vs {})'.format(
+                  design.timeline.count, timeline_before))
+        flipped_after, reason_after = explode.flip_last_batch(design)
+        check(flipped_after == 0 and reason_after == 'no explode batch this session',
+              'flip after restore: no-op')
+
+        # --- direct-modeling mode: explode/restore still work without a timeline ---
+        design.designType = adsk.fusion.DesignTypes.DirectDesignType
+        count3, _ = explode.explode_occurrences([screw1], 2.0, design)
+        check(count3 == 1, 'direct mode: explode works')
+        check(explode.restore_all(design) == 1, 'direct mode: restore works')
+
+        report(app)
+        doc.close(False)
+    except Exception:
+        report(app)
+        if ui:
+            ui.messageBox('Integration test crashed:\n{}'.format(traceback.format_exc()))
+```
+
+- [ ] **Step 3 [FUSION — Erik runs]: Run the integration test.** Scripts tab → “+” → `tests/fusion_integration/` → run **ExplodeIntegrationTest**. Paste every `[ExplodeTest]` line back.
+
+- [ ] **Step 4: Fix failures using superpowers:systematic-debugging.** For each FAIL line: form a single hypothesis, make the smallest change, have Erik re-run the script, verify. Do not stack fixes. Repeat until the summary line reports 0 failed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add in-Fusion integration tests for explode feature.`
+
+---
+
+### Task 13: Live verification and README
+
+**Files:**
+- Modify: `README.md:34-41` (Use table), `:42-52` (Configuration section)
+
+- [ ] **Step 1 [FUSION — Erik runs]: Real-world verification on an actual project.** In one of Erik's real designs: select a few fasteners (including one inside a subassembly and one nut if available), hotkey or click **Explode Fasteners**, screenshot with **Capture Image**, try **Flip Last Explode**, then **Restore Fasteners**. Confirm: lift directions look right, holes read as empty, restore leaves the design exactly as before (check the timeline tail). Report anything surprising.
+
+- [ ] **Step 2: Update the README Use table.** Add three rows after the Configure Capture row:
+
+```markdown
+| **Explode Fasteners** | Copies the selected fasteners 20mm out along their insertion axes and hides the originals — empty-hole shots without moving the assembly. Direction is inferred from the fastener's geometry. |
+| **Flip Last Explode** | Re-lifts the most recent explode batch to the opposite side, for when the direction guess is wrong. |
+| **Restore Fasteners** | Deletes all exploded copies and unhides the originals, across every outstanding batch. |
+```
+
+- [ ] **Step 3: Update the README Configuration section.** Add to the notable-keys list:
+
+```markdown
+- `explode.distance_mm` — how far Explode Fasteners lifts copies (default `20`, clamped 1–500).
+```
+
+- [ ] **Step 4: Run the full pytest suite one final time**
+
+```bash
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/ -v
+```
+
+Expected: 38 passed.
+
+- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Document explode commands in README.`
+
+- [ ] **Step 6: Finish the branch.** Use superpowers:finishing-a-development-branch to decide merge/PR/cleanup with Erik.
+
+---
+
+## Verification Summary (Definition of Done)
+
+- All pytest tests pass: `python3 -m pytest tests/ -v` → 38 passed, pristine output.
+- Integration script reports 0 failed in both parametric and direct fixtures.
+- Spike findings recorded in Task 2 and consistent with shipped code.
+- Three buttons live on the DOCUMENTATION panel; explode → capture → restore round-trips cleanly on a real design.
+- README and config.json document the feature.
+- Every commit made by Erik; no agent commits.
