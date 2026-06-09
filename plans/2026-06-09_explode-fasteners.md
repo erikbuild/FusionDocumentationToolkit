@@ -14,7 +14,7 @@
 
 1. **NEVER run `git commit`.** Erik commits all changes himself. Every "Checkpoint" step means: stop, summarize what changed, suggest a commit message, and wait for Erik.
 2. **You cannot run Fusion.** Steps marked **[FUSION — Erik runs]** require Erik to execute a script inside Fusion and paste the Text Commands palette output back. Stop and wait at each one.
-3. **Spike findings gate later tasks.** Task 2's findings are recorded in this file. If a finding contradicts the assumed API behavior in Tasks 8–12, STOP and revise with Erik before proceeding — do not improvise around a failed assumption.
+3. **Spike findings gate later tasks.** Task 2's findings are recorded in this file. If a finding contradicts the assumed API behavior in Tasks 6–12 (Finding 5 gates the head-end heuristic in Task 6; Findings 1/3/4 gate the adapters in Tasks 8–10), STOP and revise with Erik before proceeding — do not improvise around a failed assumption.
 4. All distances inside the API are **centimeters**. Config values are millimeters. Conversion happens only at `lift_distance_mm` → `mm_to_cm`.
 5. Fusion's Python is 3.x but has no pip packages; `explode.py` must import cleanly both inside Fusion (adsk available) and under pytest (adsk absent) — that's what the guarded import in Task 4 is for.
 
@@ -61,13 +61,13 @@ Read `.gitignore`. If it does not already ignore `__pycache__/`, append a line c
 
 ---
 
-### Task 2: Pre-implementation spike (verifies three undocumented API behaviors)
+### Task 2: Pre-implementation spike (verifies five undocumented API behaviors)
 
 **Files:**
 - Create: `tests/fusion_spike/ExplodeSpike.py`
 - Create: `tests/fusion_spike/ExplodeSpike.manifest`
 
-The spec flags three behaviors that must be verified in Fusion before the adapter code is final: (1) `addExistingComponent` transform coordinate space with a nested original, (2) `deleteMe` timeline cleanliness in parametric mode, (3) deepest-occurrence resolution from a body proxy via `allOccurrencesByComponent` + entity-token matching.
+The spec flags five behaviors that must be verified in Fusion before the adapter code is final: (1) `addExistingComponent` transform coordinate space with a nested original, (2) `deleteMe` timeline cleanliness in parametric mode, (3) deepest-occurrence resolution from a body proxy via `allOccurrencesByComponent` + entity-token matching, (4) attribute round-trip on occurrences via `findAttributes` (Restore/Flip depend on it), (5) head-end geometry from proxy faces — world-space readback and whether the head face's surface origin distinguishes the head end (the sole v1 sign source now that ring-ray is deferred to v2).
 
 - [ ] **Step 1: Write the spike script** at `tests/fusion_spike/ExplodeSpike.py`:
 
@@ -164,6 +164,79 @@ def run(context):
             'RESOLUTION WORKS' if matched and matched.fullPathName == nested_proxy.fullPathName
             else 'RESOLUTION FAILED — STOP AND REVISE PLAN'))
 
+        # --- Finding 4: attribute round-trip on occurrences (foundation of Restore/Flip) ---
+        # Tag an occurrence (not a component) and confirm design.findAttributes
+        # returns it, parent casts back to Occurrence, and a token value round-trips.
+        GROUP = 'FusionDocumentationToolkit'
+        inner_occ.attributes.add(GROUP, 'spikeOriginal', '1')
+        sub_occ.attributes.add(GROUP, 'spikeCopy', inner_occ.entityToken)
+        found_orig = design.findAttributes(GROUP, 'spikeOriginal')
+        found_copy = design.findAttributes(GROUP, 'spikeCopy')
+        n_orig = len(found_orig) if found_orig else 0
+        n_copy = len(found_copy) if found_copy else 0
+        parent_ok = bool(n_copy and adsk.fusion.Occurrence.cast(found_copy[0].parent))
+        value_ok = bool(n_copy and found_copy[0].value == inner_occ.entityToken)
+        log(app, 'FINDING 4 (occurrence attributes): findAttributes -> {} original, {} copy; '
+                 'parent casts to Occurrence={}, value round-trips={} -> {}'.format(
+                     n_orig, n_copy, parent_ok, value_ok,
+                     'ATTRIBUTES WORK' if (n_orig and n_copy and parent_ok and value_ok)
+                     else 'ATTRIBUTES BROKEN — STOP AND REVISE PLAN'))
+
+        # --- Finding 5: head-end geometry from proxy faces (the sole v1 sign source) ---
+        # A screw (shank r0.15 along -Z, head r0.275 on top) nested in a subassembly
+        # translated to world z=20. Confirm proxy face geometry is world-space and the
+        # head face's origin projects measurably farther along the axis than the shank's.
+        screw_sub_t = adsk.core.Matrix3D.create()
+        screw_sub_t.translation = adsk.core.Vector3D.create(0, 0, 20.0)
+        screw_sub = root.occurrences.addNewComponent(screw_sub_t)
+        screw_sub.component.name = 'ScrewSub'
+        screw_occ = screw_sub.component.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+        sc = screw_occ.component
+        sc.name = 'SpikeScrew'
+        sc_ex = sc.features.extrudeFeatures
+        shank_sk = sc.sketches.add(sc.xYConstructionPlane)
+        shank_sk.sketchCurves.sketchCircles.addByCenterRadius(adsk.core.Point3D.create(0, 0, 0), 0.15)
+        shank_in = sc_ex.createInput(shank_sk.profiles.item(0),
+                                     adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
+        shank_in.setDistanceExtent(False, adsk.core.ValueInput.createByReal(-1.0))
+        sc_ex.add(shank_in)
+        head_sk = sc.sketches.add(sc.xYConstructionPlane)
+        head_sk.sketchCurves.sketchCircles.addByCenterRadius(adsk.core.Point3D.create(0, 0, 0), 0.275)
+        head_in = sc_ex.createInput(head_sk.profiles.item(0),
+                                    adsk.fusion.FeatureOperations.JoinFeatureOperation)
+        head_in.setDistanceExtent(False, adsk.core.ValueInput.createByReal(0.3))
+        sc_ex.add(head_in)
+        screw_proxy = None
+        for i in range(root.allOccurrences.count):
+            o = root.allOccurrences.item(i)
+            if o.component.name == 'SpikeScrew':
+                screw_proxy = o
+        cyls = []  # (radius, origin_tuple, axis_tuple)
+        for bi in range(screw_proxy.bRepBodies.count):
+            b = screw_proxy.bRepBodies.item(bi)
+            for fi in range(b.faces.count):
+                g = b.faces.item(fi).geometry
+                if g.surfaceType == adsk.core.SurfaceTypes.CylinderSurfaceType:
+                    cyls.append((g.radius, (g.origin.x, g.origin.y, g.origin.z),
+                                 (g.axis.x, g.axis.y, g.axis.z)))
+        for r, o, a in cyls:
+            log(app, 'FINDING 5a: cyl r={:.3f} origin=({:.3f},{:.3f},{:.3f}) axis=({:.3f},{:.3f},{:.3f})'.format(
+                r, o[0], o[1], o[2], a[0], a[1], a[2]))
+        world_space = bool(cyls) and all(o[2] > 15.0 for _, o, _a in cyls)
+        log(app, 'FINDING 5b: proxy geometry world-space (origins near z~20, not z~0) -> {}'.format(
+            'WORLD-SPACE as assumed' if world_space else 'NOT world-space — REVISE axis_faces/body_center'))
+        if len(cyls) >= 2:
+            by_r = sorted(cyls, key=lambda c: c[0])
+            shank_o, head = by_r[0][1], by_r[-1]
+            head_o, axis = head[1], head[2]
+            proj = ((head_o[0] - shank_o[0]) * axis[0] + (head_o[1] - shank_o[1]) * axis[1]
+                    + (head_o[2] - shank_o[2]) * axis[2])
+            log(app, 'FINDING 5c: head origin projects {:.4f} beyond shank along axis -> {}'.format(
+                proj, 'HEAD-END DISTINGUISHABLE' if abs(proj) > 1e-4
+                else 'ORIGINS COINCIDE — head_end_sign UNRELIABLE, use face bbox instead'))
+        else:
+            log(app, 'FINDING 5c: expected >=2 cylindrical faces, got {} — STOP AND REVISE'.format(len(cyls)))
+
         doc.close(False)
         log(app, 'Spike complete. Paste all [ExplodeSpike] lines back to the agent.')
     except Exception:
@@ -184,12 +257,19 @@ def run(context):
 
 - [ ] **Step 3 [FUSION — Erik runs]: Run the spike.** In Fusion: Utilities → Add-Ins → Scripts tab → green “+” → select `tests/fusion_spike/`, run **ExplodeSpike**, then copy every `[ExplodeSpike]` line from the Text Commands palette back into the conversation.
 
-- [ ] **Step 4: Record findings in this plan file.** Edit this checklist item to include the three findings verbatim. If Finding 1 is not root-relative or Finding 3 fails, STOP — revise Tasks 8/10 with Erik before continuing. If Finding 2 leaves timeline residue, note it in the spec's Parametric vs Direct Mode section and surface it to Erik (Restore still works; the timeline just isn't pristine).
+- [ ] **Step 4: Record findings in this plan file.** Edit this checklist item to include the five findings verbatim. STOP and revise with Erik before continuing if any of these fail:
+  - Finding 1 not root-relative → revise Tasks 9/10 (the lift transform).
+  - Finding 3 fails → revise Task 8 (selection resolution).
+  - Finding 4 shows attributes broken → STOP; the entire tracking design must change before Task 10.
+  - Finding 5b not world-space, or 5c shows origins coincide → revise Task 6's `head_end_sign` to take an axial reference from the face bounding box instead of the surface origin (and Task 9's `axis_faces` to supply it) before writing those tests.
+  - Finding 2 leaves timeline residue → not a blocker: note it here and in the spec's Parametric vs Direct Mode section, surface it to Erik, and adjust the Task 12 timeline assertion to expect the residue (Restore still works; the timeline just isn't pristine).
 
 **Spike findings (fill in):**
 - Finding 1:
 - Finding 2:
 - Finding 3:
+- Finding 4:
+- Finding 5:
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add API spike script for explode feature.`
 
@@ -226,18 +306,6 @@ class TestVectorHelpers:
 
     def test_sub(self):
         assert explode.v_sub((5, 5, 5), (1, 2, 3)) == (4, 3, 2)
-
-    def test_cross_right_handed(self):
-        assert explode.v_cross((1, 0, 0), (0, 1, 0)) == (0, 0, 1)
-
-    def test_perpendicular_basis_is_orthonormal(self):
-        for axis in [(0, 0, 1), (1, 0, 0), (0.577, 0.577, 0.577)]:
-            u, w = explode.perpendicular_basis(explode.v_norm(axis))
-            assert explode.v_dot(u, axis) == pytest.approx(0, abs=1e-9)
-            assert explode.v_dot(w, axis) == pytest.approx(0, abs=1e-9)
-            assert explode.v_dot(u, w) == pytest.approx(0, abs=1e-9)
-            assert math.sqrt(explode.v_dot(u, u)) == pytest.approx(1.0)
-            assert math.sqrt(explode.v_dot(w, w)) == pytest.approx(1.0)
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -279,24 +347,9 @@ def v_sub(a, b):
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
 
-def v_cross(a, b):
-    return (a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0])
-
-
 def v_norm(a):
     length = math.sqrt(v_dot(a, a))
     return (a[0] / length, a[1] / length, a[2] / length)
-
-
-def perpendicular_basis(axis):
-    """Two unit vectors perpendicular to axis and to each other, for laying
-    out ring-ray origins around the axis."""
-    helper = (0, 0, 1) if abs(axis[2]) < 0.9 else (1, 0, 0)
-    u = v_norm(v_cross(axis, helper))
-    w = v_norm(v_cross(axis, u))
-    return u, w
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -305,7 +358,7 @@ def perpendicular_basis(axis):
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
 ```
 
-Expected: 6 passed.
+Expected: 4 passed.
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add explode module with vector helpers.`
 
@@ -353,7 +406,7 @@ class TestLiftDistance:
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
 ```
 
-Expected: 6 passed (Task 3), 7 failed with `AttributeError: module 'explode' has no attribute 'lift_distance_mm'`.
+Expected: 4 passed (Task 3), 7 failed with `AttributeError: module 'explode' has no attribute 'lift_distance_mm'`.
 
 - [ ] **Step 3: Append the implementation** to the pure-logic section of `explode.py`:
 
@@ -385,7 +438,7 @@ def mm_to_cm(mm):
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
 ```
 
-Expected: 13 passed.
+Expected: 11 passed.
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add lift distance config parsing.`
 
@@ -493,13 +546,13 @@ def dominant_axis(faces, tolerance_deg=AXIS_BUCKET_TOLERANCE_DEG):
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
 ```
 
-Expected: 20 passed.
+Expected: 18 passed.
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add dominant axis inference.`
 
 ---
 
-### Task 6: Sign heuristics (head end, ring rays, final choice)
+### Task 6: Sign heuristics (head end and final choice)
 
 **Files:**
 - Modify: `explode.py`
@@ -533,44 +586,21 @@ class TestHeadEndSign:
         assert explode.head_end_sign([], (0, 0, 1), (0, 0, 0)) is None
 
 
-class TestRingRaySign:
-    def test_material_on_positive_side_lifts_negative(self):
-        assert explode.ring_ray_sign([0.3], [], threshold=2.0) == -1
-
-    def test_material_on_negative_side_lifts_positive(self):
-        assert explode.ring_ray_sign([], [0.3], threshold=2.0) == 1
-
-    def test_material_both_sides_is_ambiguous(self):
-        assert explode.ring_ray_sign([0.3], [0.4], threshold=2.0) is None
-
-    def test_no_material_is_ambiguous(self):
-        assert explode.ring_ray_sign([], [], threshold=2.0) is None
-
-    def test_hits_beyond_threshold_do_not_count(self):
-        assert explode.ring_ray_sign([35.0], [0.3], threshold=2.0) == 1
-
-    def test_hit_exactly_at_threshold_counts(self):
-        assert explode.ring_ray_sign([2.0], [], threshold=2.0) == -1
-
-
 class TestChooseSign:
-    def test_head_sign_wins(self):
-        assert explode.choose_sign(-1, 1) == -1
-
-    def test_ray_sign_breaks_tie(self):
-        assert explode.choose_sign(None, -1) == -1
+    def test_head_sign_used(self):
+        assert explode.choose_sign(-1) == -1
 
     def test_fallback_is_positive(self):
-        assert explode.choose_sign(None, None) == 1
+        assert explode.choose_sign(None) == 1
 ```
 
 - [ ] **Step 2: Run to verify the new tests fail**
 
 ```bash
-cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -k "HeadEnd or RingRay or ChooseSign" -v
+cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -k "HeadEnd or ChooseSign" -v
 ```
 
-Expected: 14 failed with `AttributeError`.
+Expected: 7 failed with `AttributeError`.
 
 - [ ] **Step 3: Append the implementation:**
 
@@ -578,7 +608,7 @@ Expected: 14 failed with `AttributeError`.
 HEAD_RADIUS_RATIO = 1.05  # head must be at least 5% larger than the shank
 
 
-def head_end_sign(coaxial_faces, axis, body_center):
+def head_end_sign(coaxial_faces, axis, center):
     """Sign along axis pointing toward the fastener's larger-diameter (head)
     end. 'Out' is always toward the head for seated screws, bolts, and flanged
     inserts. Returns None when inapplicable: no coaxial faces (local-Z
@@ -589,31 +619,17 @@ def head_end_sign(coaxial_faces, axis, body_center):
     if max(radii) < min(radii) * HEAD_RADIUS_RATIO:
         return None
     head_face = max(coaxial_faces, key=lambda f: f['radius'])
-    position = v_dot(v_sub(head_face['origin'], body_center), axis)
+    position = v_dot(v_sub(head_face['origin'], center), axis)
     if position == 0:
         return None
     return 1 if position > 0 else -1
 
 
-def ring_ray_sign(hit_distances_pos, hit_distances_neg, threshold):
-    """Sign away from neighboring material found by the ring-ray test.
-    Each argument lists distances of non-fastener hits along +axis/-axis;
-    a side has material when any hit lies within threshold. Returns +1, -1,
-    or None when both or neither side has material."""
-    material_pos = any(d <= threshold for d in hit_distances_pos)
-    material_neg = any(d <= threshold for d in hit_distances_neg)
-    if material_pos == material_neg:
-        return None
-    return -1 if material_pos else 1
-
-
-def choose_sign(head_sign, ray_sign):
-    """Final lift sign: head end wins, ring rays break ties, +axis last."""
-    if head_sign is not None:
-        return head_sign
-    if ray_sign is not None:
-        return ray_sign
-    return 1
+def choose_sign(head_sign):
+    """Final lift sign: toward the head end when the head-end heuristic decided
+    one, else +axis (the user presses Flip if that guessed wrong). The v2
+    ring-ray tie-breaker will slot in here as the middle case."""
+    return head_sign if head_sign is not None else 1
 ```
 
 - [ ] **Step 4: Run the full suite**
@@ -622,109 +638,27 @@ def choose_sign(head_sign, ray_sign):
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
 ```
 
-Expected: 34 passed.
+Expected: 25 passed.
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add lift sign heuristics.`
 
 ---
 
-### Task 7: Ring-ray geometry planning (origins and threshold)
+### Task 7: Ring-ray sign tie-breaker — DEFERRED TO v2 (skip)
 
-**Files:**
-- Modify: `explode.py`
-- Modify: `tests/test_explode_logic.py`
+The offset ring-ray test is out of scope for v1. v1 picks the lift sign from the
+head-end heuristic (Task 6) and falls back to +axis, so headless fasteners (nuts,
+dowels, set screws) may guess wrong and need one **Flip Last Explode**. There is
+no code to write here.
 
-This keeps the ray *layout* pure and testable; only the actual casting (Task 9) touches Fusion.
+The v2 work this task will cover when revived: the pure helpers `ring_radius` /
+`ray_threshold` / `ring_origins` / `ring_ray_sign` (plus the `v_cross` /
+`perpendicular_basis` vector helpers they need), the `cast_side_rays` adapter, the
+`axial_half_extent` / `radial_extent` outputs of `body_metrics`, and wiring the
+ray sign into `choose_sign` as its middle case. See the spec's Out of Scope
+section for the design sketch.
 
-- [ ] **Step 1: Append the failing tests:**
-
-```python
-class TestRingRayPlan:
-    def test_ring_radius_between_bore_and_outer_when_radii_distinct(self):
-        assert explode.ring_radius([0.125, 0.31], radial_extent=0.31) == pytest.approx(0.2175)
-
-    def test_ring_radius_falls_back_to_70pct_of_radial_extent(self):
-        assert explode.ring_radius([0.15], radial_extent=0.275) == pytest.approx(0.1925)
-        assert explode.ring_radius([], radial_extent=0.275) == pytest.approx(0.1925)
-
-    def test_threshold_is_max_of_extent_and_lift(self):
-        assert explode.ray_threshold(axial_extent=1.3, lift_cm=2.0) == 2.0
-        assert explode.ray_threshold(axial_extent=3.0, lift_cm=2.0) == 3.0
-
-    def test_ring_origins_layout(self):
-        origins = explode.ring_origins(center=(0, 0, 0), axis=(0, 0, 1),
-                                       axial_half_extent=0.5, ring_r=0.2, count=8)
-        assert len(origins['pos']) == 8
-        assert len(origins['neg']) == 8
-        for p in origins['pos']:
-            assert p[2] == pytest.approx(0.5 + explode.RAY_START_EPSILON_CM)
-            assert math.sqrt(p[0] ** 2 + p[1] ** 2) == pytest.approx(0.2)
-        for p in origins['neg']:
-            assert p[2] == pytest.approx(-0.5 - explode.RAY_START_EPSILON_CM)
-            assert math.sqrt(p[0] ** 2 + p[1] ** 2) == pytest.approx(0.2)
-```
-
-- [ ] **Step 2: Run to verify the new tests fail**
-
-```bash
-cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -k RingRayPlan -v
-```
-
-Expected: 4 failed with `AttributeError`.
-
-- [ ] **Step 3: Append the implementation:**
-
-```python
-RING_RAY_COUNT = 8
-RING_RADIUS_FALLBACK_RATIO = 0.7
-RAY_START_EPSILON_CM = 0.05
-
-
-def ring_radius(coaxial_radii, radial_extent):
-    """Radial offset for ring-ray origins: midway between bore and outer
-    radius when the coaxial faces provide distinct radii, otherwise 70% of
-    the body's maximal radial extent. Targets the seat face annulus rather
-    than the clearance-hole void a center ray would sail down."""
-    distinct = sorted(set(coaxial_radii))
-    if len(distinct) >= 2:
-        return (distinct[0] + distinct[-1]) / 2.0
-    return radial_extent * RING_RADIUS_FALLBACK_RATIO
-
-
-def ray_threshold(axial_extent, lift_cm):
-    """A ray hit counts as neighboring material only within this distance."""
-    return max(axial_extent, lift_cm)
-
-
-def ring_origins(center, axis, axial_half_extent, ring_r, count=RING_RAY_COUNT):
-    """Ray start points just outside the body's axial extents, arranged in a
-    ring around the axis. Returns {'pos': [...], 'neg': [...]} — origins for
-    rays traveling along +axis and -axis respectively, away from the body."""
-    u, w = perpendicular_basis(axis)
-    out = {'pos': [], 'neg': []}
-    for side, key in ((1, 'pos'), (-1, 'neg')):
-        base = v_scale(axis, side * (axial_half_extent + RAY_START_EPSILON_CM))
-        for k in range(count):
-            angle = 2.0 * math.pi * k / count
-            radial = v_scale(u, ring_r * math.cos(angle))
-            radial = (radial[0] + w[0] * ring_r * math.sin(angle),
-                      radial[1] + w[1] * ring_r * math.sin(angle),
-                      radial[2] + w[2] * ring_r * math.sin(angle))
-            out[key].append((center[0] + base[0] + radial[0],
-                             center[1] + base[1] + radial[1],
-                             center[2] + base[2] + radial[2]))
-    return out
-```
-
-- [ ] **Step 4: Run the full suite**
-
-```bash
-cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/test_explode_logic.py -v
-```
-
-Expected: 38 passed.
-
-- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add ring-ray layout planning.`
+**No checkpoint — nothing changes in this task.**
 
 ---
 
@@ -862,18 +796,20 @@ def resolve_to_occurrences(entities, root):
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
 ```
 
-Expected: `import ok`, 38 passed.
+Expected: `import ok`, 25 passed.
 
 - [ ] **Step 4: Checkpoint — ask Erik to review and commit.** Suggested message: `Add explode module state and selection resolution.`
 
 ---
 
-### Task 9: Fusion adapters — geometry extraction and ray casting
+### Task 9: Fusion adapters — geometry extraction and inference
 
 **Files:**
 - Modify: `explode.py`
 
-- [ ] **Step 1: Append face extraction and body measurements:**
+Note: the cone branch of `axis_faces` reads `geom.radius`. Confirm `adsk.core.Cone` exposes `radius` in this Fusion build (countersunk/chamfer faces hit that branch); a missing property is a runtime `AttributeError` pytest can't catch. If it's absent, drop the cone branch for v1 — cylinders alone cover the fixture's fasteners.
+
+- [ ] **Step 1: Append face extraction and the body center:**
 
 ```python
 def axis_faces(occ):
@@ -898,10 +834,9 @@ def axis_faces(occ):
     return records
 
 
-def body_metrics(occ, axis):
-    """(center, axial_half_extent, radial_extent) of the occurrence's combined
-    body bounding boxes, measured against the lift axis. Bounding boxes are
-    world-aligned so this is an approximation — good enough for ray layout."""
+def body_center(occ):
+    """Centroid of the occurrence's combined body bounding-box corners, in
+    world space — the reference point the head-end heuristic measures from."""
     corners = []
     for i in range(occ.bRepBodies.count):
         bb = occ.bRepBodies.item(i).boundingBox
@@ -910,49 +845,18 @@ def body_metrics(occ, axis):
             for y in (lo.y, hi.y):
                 for z in (lo.z, hi.z):
                     corners.append((x, y, z))
-    center = (sum(c[0] for c in corners) / len(corners),
-              sum(c[1] for c in corners) / len(corners),
-              sum(c[2] for c in corners) / len(corners))
-    axial = [v_dot(v_sub(c, center), axis) for c in corners]
-    radial = []
-    for c in corners:
-        rel = v_sub(c, center)
-        along = v_scale(axis, v_dot(rel, axis))
-        radial.append(math.sqrt(v_dot(v_sub(rel, along), v_sub(rel, along))))
-    return center, max(abs(a) for a in axial), max(radial)
+    return (sum(c[0] for c in corners) / len(corners),
+            sum(c[1] for c in corners) / len(corners),
+            sum(c[2] for c in corners) / len(corners))
 ```
 
-- [ ] **Step 2: Append ray casting:**
+- [ ] **Step 2: Append the per-fastener inference:**
 
 ```python
-def cast_side_rays(root, occ, origins, direction):
-    """Distances of non-fastener body hits for rays from each origin along
-    direction. Hidden entities are not hit (findBRepUsingRay honors
-    visibility) — acceptable because all inference runs before this command
-    hides anything."""
-    own_tokens = set()
-    for i in range(occ.bRepBodies.count):
-        own_tokens.add(occ.bRepBodies.item(i).entityToken)
-    direction_v = adsk.core.Vector3D.create(*direction)
-    distances = []
-    for origin in origins:
-        origin_p = adsk.core.Point3D.create(*origin)
-        hit_points = adsk.core.ObjectCollection.create()
-        entities = root.findBRepUsingRay(
-            origin_p, direction_v,
-            adsk.fusion.BRepEntityTypes.BRepBodyEntityType,
-            -1.0, True, hit_points)
-        for k in range(entities.count):
-            body = adsk.fusion.BRepBody.cast(entities.item(k))
-            if body and body.entityToken in own_tokens:
-                continue
-            distances.append(origin_p.distanceTo(hit_points.item(k)))
-    return distances
-
-
-def infer_lift_vector(occ, root, distance_cm):
-    """The full Phase-A decision for one occurrence: (axis, sign) or
-    (None, reason) when no axis can be inferred."""
+def infer_lift_vector(occ):
+    """The Phase-A decision for one occurrence: (axis, sign) or (None, reason)
+    when no axis can be inferred. Reads only the occurrence's own geometry —
+    nothing about the surrounding scene — so it is order-independent."""
     faces = axis_faces(occ)
     axis, coaxial = dominant_axis(faces)
     if axis is None:
@@ -962,16 +866,7 @@ def infer_lift_vector(occ, root, distance_cm):
             return None, 'no cylindrical faces and degenerate transform'
         axis = v_norm(z)
         coaxial = []
-    center, axial_half_extent, radial_extent = body_metrics(occ, axis)
-    sign = head_end_sign(coaxial, axis, center)
-    if sign is None:
-        radii = [f['radius'] for f in coaxial]
-        ring_r = ring_radius(radii, radial_extent)
-        origins = ring_origins(center, axis, axial_half_extent, ring_r)
-        threshold = ray_threshold(axial_half_extent * 2.0, distance_cm)
-        hits_pos = cast_side_rays(root, occ, origins['pos'], axis)
-        hits_neg = cast_side_rays(root, occ, origins['neg'], v_scale(axis, -1.0))
-        sign = choose_sign(None, ring_ray_sign(hits_pos, hits_neg, threshold))
+    sign = choose_sign(head_end_sign(coaxial, axis, body_center(occ)))
     return (axis, sign), None
 ```
 
@@ -981,9 +876,9 @@ def infer_lift_vector(occ, root, distance_cm):
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
 ```
 
-Expected: `import ok`, 38 passed.
+Expected: `import ok`, 25 passed.
 
-- [ ] **Step 4: Checkpoint — ask Erik to review and commit.** Suggested message: `Add geometry extraction and ray casting adapters.`
+- [ ] **Step 4: Checkpoint — ask Erik to review and commit.** Suggested message: `Add geometry extraction and inference adapters.`
 
 ---
 
@@ -1041,7 +936,7 @@ def explode_occurrences(occurrences, distance_cm, design):
     plans = []
     skipped = []
     for occ in occurrences:
-        result, reason = infer_lift_vector(occ, root, distance_cm)
+        result, reason = infer_lift_vector(occ)
         if result is None:
             skipped.append((occurrence_label(occ), reason))
             continue
@@ -1070,8 +965,11 @@ def explode_occurrences(occurrences, distance_cm, design):
 
 ```python
 def find_tagged_attributes(design, attr_name):
+    """All attributes with this name in our group, as a plain list so callers
+    can delete attributes or their owning entities while iterating without
+    skipping items."""
     attrs = design.findAttributes(ATTR_GROUP, attr_name)
-    return attrs if attrs else []
+    return list(attrs) if attrs else []
 
 
 def resolve_token(design, token):
@@ -1155,7 +1053,7 @@ Note: `create_lifted_copy` re-tags the original (`attributes.add` overwrites the
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
 ```
 
-Expected: `import ok`, 38 passed.
+Expected: `import ok`, 25 passed.
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add explode, restore, and flip engines.`
 
@@ -1378,7 +1276,7 @@ cd /Users/erik/Code/FusionDocumentationToolkit && cp -r resources/capture resour
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -c "import json; json.load(open('config.json')); print('config ok')" && python3 -c "import explode; print('import ok')" && python3 -m pytest tests/test_explode_logic.py -q
 ```
 
-Expected: `config ok`, `import ok`, 38 passed.
+Expected: `config ok`, `import ok`, 25 passed.
 
 - [ ] **Step 6 [FUSION — Erik runs]: Smoke test.** Re-run the add-in (Utilities → Add-Ins → stop, then Run). Confirm: three new buttons appear on the DOCUMENTATION panel; clicking Restore in an empty design logs `[ExplodeFasteners] Restore: nothing to restore` to the palette; nothing crashes. Report back.
 
@@ -1421,6 +1319,11 @@ import adsk.fusion
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO_ROOT)
 import explode  # noqa: E402
+
+# Set from spike Finding 2: timeline items left after a copy's deleteMe in
+# parametric mode. 0 when Finding 2 reported a clean timeline; bump to the
+# observed residue otherwise so the restore assertion matches reality.
+EXPECTED_TIMELINE_RESIDUE = 0
 
 _results = []
 
@@ -1592,8 +1495,11 @@ def run(context):
         check(abs(world_z(copy_s1) - (z_screw1 + 2.0)) < 1e-5,
               'explode: screw1 head-up lift is +Z by 2.0 (got dz={:.4f})'.format(
                   world_z(copy_s1) - z_screw1))
-        check(abs(world_z(copy_nut) - (z_nut - 2.0)) < 1e-5,
-              'explode: nut lifts -Z, opposite its coaxial screw (got dz={:.4f})'.format(
+        # The square nut has no distinct head, so v1 picks the sign from the
+        # +axis fallback — direction isn't determinable, only that it lifts the
+        # full distance along its (Z) axis. Flip is what gets it the right way.
+        check(abs(abs(world_z(copy_nut) - z_nut) - 2.0) < 1e-5,
+              'explode: nut lifts 2.0 along its axis via fallback (got dz={:.4f})'.format(
                   world_z(copy_nut) - z_nut))
         check(abs(world_z(copy_s2) - (z_screw2 + 2.0)) < 1e-5,
               'explode: nested screw lifts +Z (got dz={:.4f})'.format(
@@ -1633,9 +1539,9 @@ def run(context):
               'restore: no original tags remain')
         check(screw1.isLightBulbOn and nut.isLightBulbOn and screw2.isLightBulbOn,
               'restore: originals visible again')
-        check(design.timeline.count == timeline_before,
-              'restore: timeline back to pre-explode count ({} vs {})'.format(
-                  design.timeline.count, timeline_before))
+        check(design.timeline.count == timeline_before + EXPECTED_TIMELINE_RESIDUE,
+              'restore: timeline as expected per spike Finding 2 ({} vs {}+{})'.format(
+                  design.timeline.count, timeline_before, EXPECTED_TIMELINE_RESIDUE))
         flipped_after, reason_after = explode.flip_last_batch(design)
         check(flipped_after == 0 and reason_after == 'no explode batch this session',
               'flip after restore: no-op')
@@ -1667,9 +1573,11 @@ def run(context):
 **Files:**
 - Modify: `README.md:34-41` (Use table), `:42-52` (Configuration section)
 
-- [ ] **Step 1 [FUSION — Erik runs]: Real-world verification on an actual project.** In one of Erik's real designs: select a few fasteners (including one inside a subassembly and one nut if available), hotkey or click **Explode Fasteners**, screenshot with **Capture Image**, try **Flip Last Explode**, then **Restore Fasteners**. Confirm: lift directions look right, holes read as empty, restore leaves the design exactly as before (check the timeline tail). Report anything surprising.
+- [ ] **Step 1 [FUSION — Erik runs]: Real-world verification on an actual project.** In one of Erik's real designs: select a few fasteners (including one inside a subassembly and one nut if available), hotkey or click **Explode Fasteners**, screenshot with **Capture Image**, try **Flip Last Explode**, then **Restore Fasteners**. Confirm: lift directions look right (expect headless fasteners like nuts to sometimes need a Flip — that's the v1 design), holes read as empty, restore leaves the design exactly as before (check the timeline tail). Report anything surprising.
 
-- [ ] **Step 2: Update the README Use table.** Add three rows after the Configure Capture row:
+- [ ] **Step 2 [FUSION — Erik runs]: Cross-session persistence check.** This is the one feature claim no automated test covers. Explode a couple of fasteners, **save** the document, **close** it, **reopen** it, then press **Restore Fasteners**. Confirm the copies are removed and originals unhidden — i.e. the tags survived the save/reopen. Report the result.
+
+- [ ] **Step 3: Update the README Use table.** Add three rows after the Configure Capture row:
 
 ```markdown
 | **Explode Fasteners** | Copies the selected fasteners 20mm out along their insertion axes and hides the originals — empty-hole shots without moving the assembly. Direction is inferred from the fastener's geometry. |
@@ -1677,31 +1585,31 @@ def run(context):
 | **Restore Fasteners** | Deletes all exploded copies and unhides the originals, across every outstanding batch. |
 ```
 
-- [ ] **Step 3: Update the README Configuration section.** Add to the notable-keys list:
+- [ ] **Step 4: Update the README Configuration section.** Add to the notable-keys list:
 
 ```markdown
 - `explode.distance_mm` — how far Explode Fasteners lifts copies (default `20`, clamped 1–500).
 ```
 
-- [ ] **Step 4: Run the full pytest suite one final time**
+- [ ] **Step 5: Run the full pytest suite one final time**
 
 ```bash
 cd /Users/erik/Code/FusionDocumentationToolkit && python3 -m pytest tests/ -v
 ```
 
-Expected: 38 passed.
+Expected: 25 passed.
 
-- [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Document explode commands in README.`
+- [ ] **Step 6: Checkpoint — ask Erik to review and commit.** Suggested message: `Document explode commands in README.`
 
-- [ ] **Step 6: Finish the branch.** Use superpowers:finishing-a-development-branch to decide merge/PR/cleanup with Erik.
+- [ ] **Step 7: Finish the branch.** Use superpowers:finishing-a-development-branch to decide merge/PR/cleanup with Erik.
 
 ---
 
 ## Verification Summary (Definition of Done)
 
-- All pytest tests pass: `python3 -m pytest tests/ -v` → 38 passed, pristine output.
-- Integration script reports 0 failed in both parametric and direct fixtures.
-- Spike findings recorded in Task 2 and consistent with shipped code.
-- Three buttons live on the DOCUMENTATION panel; explode → capture → restore round-trips cleanly on a real design.
+- All pytest tests pass: `python3 -m pytest tests/ -v` → 25 passed, pristine output.
+- Integration script reports 0 failed in both parametric and direct fixtures (with the timeline assertion set to match spike Finding 2).
+- All five spike findings recorded in Task 2 and consistent with shipped code.
+- Three buttons live on the DOCUMENTATION panel; explode → capture → restore round-trips cleanly on a real design, and survives a save/close/reopen (Task 13 Steps 1–2).
 - README and config.json document the feature.
 - Every commit made by Erik; no agent commits.

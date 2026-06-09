@@ -34,7 +34,7 @@ Each command gets an icon set under `resources/<commandName>/` (16/32/64 px). Pl
 
 ## Explode Algorithm
 
-The command runs in two phases: **inference first, mutation second**. All axis and sign decisions for the whole batch are computed against the untouched scene before any copy is created or any original hidden — otherwise the first fastener's copy and hidden original would corrupt the ray tests of coaxial neighbors (a screw and its nut selected together is a core use case).
+The command runs in two phases: **inference first, mutation second**. All axis and sign decisions for the whole batch are computed before any copy is created or any original hidden, so the result never depends on the order fasteners are processed or on a half-mutated scene.
 
 ### Phase A — resolve and infer (read-only)
 
@@ -53,9 +53,7 @@ For each entity in the selection:
 
 3. **Pick the sign** (which way is "out" — no API provides this). In order:
    - **Head-end heuristic (primary).** Among the faces coaxial with the chosen axis, the largest-radius one marks the head OD; the body end nearest it is the head end, and the sign points from the body center toward that end. ("Out" is always toward the head for seated screws, bolts, and flanged inserts, including counterbored ones.) Inapplicable when the coaxial radii are all equal within tolerance (nuts, dowels, set screws) or the axis came from the local-Z fallback.
-   - **Offset ring-ray test (tie-breaker).** Cast a small ring of rays (e.g., 8 origins) parallel to the axis in each direction, starting just outside the body's axial extents and traveling away from the body, with origins offset radially from the axis — between the bore and outer radius when coaxial faces provide them, otherwise at ~70% of the body's maximal radial extent (exact radii tuned during implementation against the test fixture). A side counts as having material when any ray hits a non-fastener body within **K = max(body extent along the axis, configured lift distance)**. The side with material is "in"; lift the other way. A center-axis ray would travel uselessly down the clearance hole, which is why the origins are offset to where the seat face actually is.
-   - **Fallback:** +axis. Flip Last Explode is the user-level escape hatch.
-   - Caveat: ray casting honors visibility, so parts the user has hidden are invisible to the test. Acceptable — all inference runs in Phase A against the pristine scene, and Flip covers misfires.
+   - **Fallback:** +axis. Flip Last Explode is the user-level escape hatch — for fasteners with no distinct head (nuts, dowels, set screws), the first guess may point the wrong way and the user presses Flip. A geometry-driven tie-breaker (the offset ring-ray test) is planned for v2 to get those right on the first press; see Out of Scope.
 
 ### Phase B — mutate
 
@@ -112,8 +110,8 @@ No other knobs in v1: originals are always hidden, copies always land in root, a
 
 - New module `explode.py` beside the main file (the main file is already ~660 lines; this feature would push it past 1,000).
 - `explode.py` separates pure decision logic from API access:
-  - **Pure functions** operating on plain data (tuples/dicts): axis bucketing and selection, head-end heuristic, ring-ray sign decision from hit distances, mm→cm conversion and clamping. These run under pytest with synthetic data — no `adsk` imports.
-  - **Fusion adapter functions**: selection resolution, face/axis extraction, ray casting, copy creation, attribute tagging, visibility. These touch `adsk` and are exercised by the in-Fusion test script.
+  - **Pure functions** operating on plain data (tuples/dicts): axis bucketing and selection, head-end heuristic, the lift-sign decision, mm→cm conversion and clamping. These run under pytest with synthetic data — no `adsk` imports.
+  - **Fusion adapter functions**: selection resolution, face/axis extraction, copy creation, attribute tagging, visibility. These touch `adsk` and are exercised by the in-Fusion test script.
 - The main file registers the three commands and delegates to `explode.py`. Both files carry ABOUTME headers.
 
 ## Error Handling
@@ -131,21 +129,25 @@ Copy creation and deletion are ordinary operations in both modes. No snapshots a
 
 ## Pre-Implementation Spike
 
-Three API behaviors were flagged as undocumented or single-sourced in the research and must be verified in Fusion before implementation:
+Five API behaviors were flagged as undocumented or single-sourced in the research and must be verified in Fusion before implementation:
 
 1. **`addExistingComponent` transform coordinate space** — assumed root-relative when called on `rootComponent.occurrences`; verify with a nested original.
 2. **`deleteMe` timeline behavior in parametric mode** — verify the copy's create item is removed (timeline ends clean after restore) rather than leaving a create/remove pair.
 3. **Deepest-occurrence resolution from a canvas pick** — verify a mechanism for resolving a BRepFace/BRepBody proxy to the occurrence that directly owns it (candidate approaches: walking the proxy's `assemblyContext` path, or matching `nativeObject.parentComponent` against `allOccurrencesByComponent` along the path).
+4. **Attribute round-trip on occurrences** — Restore and Flip rest entirely on this: verify that attributes added to an *occurrence* (not a component) are returned by `design.findAttributes`, that `attribute.parent` casts back to the occurrence, and that a stored entity-token value round-trips. If this fails, the whole tracking design must change.
+5. **Head-end geometry from proxy faces** — with the ring-ray tie-breaker deferred, the head-end heuristic is the only sign source, so verify its inputs in the proxy context: that a nested fastener's cylindrical face `geometry` (axis, origin, radius) reads back in **world space**, and that the larger-radius (head) face's `origin` projects measurably farther along the axis than the shank's — i.e. the surface origin actually distinguishes the head end. If the origins coincide, the heuristic needs a different axial reference (face bounding box or evaluator) before Task 6.
 
 Spike findings get recorded in the implementation plan before the relevant tasks are finalized.
 
 ## Testing
 
-- **Unit (pytest, outside Fusion):** the pure functions — axis bucketing (parallel/antiparallel grouping, area summing, the 1.0° tolerance edges), head-end heuristic (clear head; all-equal radii → inapplicable; fallback-axis case → inapplicable), ring-ray sign decision (material one side / both / neither, hits at and beyond the K threshold), config parsing and clamping. Synthetic face and ray data; no Fusion required.
-- **Integration / E2E (inside Fusion):** a test script run from Fusion's script environment that **builds its own fixture document programmatically** (a plate with through and blind holes, screws at root level and inside a subassembly, a screw+nut pair on a shared axis, a square nut), runs explode/flip/restore against it, and asserts: copy positions and lift directions (including the coaxial pair lifting in opposite directions), original visibility states, attribute tags, restore completeness, double-explode of the same fastener being skipped, and (parametric mode) a clean timeline afterward. Reports pass/fail to the Text Commands palette and closes the fixture without saving. Run in both parametric and direct-modeling fixture modes. Fusion has no headless mode, so this is launched manually in-app, but it is fully self-contained and deterministic.
+- **Unit (pytest, outside Fusion):** the pure functions — axis bucketing (parallel/antiparallel grouping, area summing, the 1.0° tolerance edges), head-end heuristic (clear head; all-equal radii → inapplicable; fallback-axis case → inapplicable), the lift-sign decision (head-end wins, +axis fallback), config parsing and clamping. Synthetic face data; no Fusion required.
+- **Integration / E2E (inside Fusion):** a test script run from Fusion's script environment that **builds its own fixture document programmatically** (a plate with through and blind holes, screws at root level and inside a subassembly, a screw+nut pair on a shared axis, a square nut), runs explode/flip/restore against it, and asserts: copy positions and lift directions (headed screws lift head-out by the head-end heuristic; the square nut has no distinct head, so v1 lifts it via the +axis fallback — the test asserts lift magnitude along the axis, not direction, and that Flip reverses it), original visibility states, attribute tags, restore completeness, double-explode of the same fastener being skipped, and (parametric mode) the timeline cleanliness established by spike Finding 2. Reports pass/fail to the Text Commands palette and closes the fixture without saving. Run in both parametric and direct-modeling fixture modes. Fusion has no headless mode, so this is launched manually in-app, but it is fully self-contained and deterministic.
+- **Cross-session persistence (manual):** explode, save, close, reopen the document, then Restore — confirm the tags persist and Restore still finds everything. This is the one feature claim no automated path covers (the integration test is single-session).
 
 ## Out of Scope (v1)
 
+- Offset ring-ray sign tie-breaker. v1 picks the sign from the head-end heuristic and falls back to +axis; headless fasteners (nuts, dowels, set screws) may guess wrong and need one Flip. v2 adds the ring-ray test (cast a ring of rays parallel to the axis from just outside each end, the side with neighboring material is "in") to get those right on the first press.
 - Joint-based axis inference (this project's fasteners are placed without joints; the geometry path covers them).
 - Move semantics for the originals (copy + hide achieves the empty-hole shot without touching the assembly).
 - Per-run distance or direction UI; hide-originals toggle.
