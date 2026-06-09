@@ -16,7 +16,8 @@
 2. **You cannot run Fusion.** Steps marked **[FUSION — Erik runs]** require Erik to execute a script inside Fusion and paste the Text Commands palette output back. Stop and wait at each one.
 3. **Spike findings gate later tasks.** Task 2's findings are recorded in this file. If a finding contradicts the assumed API behavior in Tasks 6–12 (Finding 5 gates the head-end heuristic in Task 6; Findings 1/3/4 gate the adapters in Tasks 8–10), STOP and revise with Erik before proceeding — do not improvise around a failed assumption.
 4. All distances inside the API are **centimeters**. Config values are millimeters. Conversion happens only at `lift_distance_mm` → `mm_to_cm`.
-5. Fusion's Python is 3.x but has no pip packages; `explode.py` must import cleanly both inside Fusion (adsk available) and under pytest (adsk absent) — that's what the guarded import in Task 4 is for.
+5. Fusion's Python is 3.x but has no pip packages; `explode.py` must import cleanly both inside Fusion (adsk available) and under pytest (adsk absent) — that's what the guarded import in Task 3 is for.
+6. **Test runner is `uv run pytest`.** The machine's Python is Homebrew's (externally-managed, PEP 668), so pytest lives in a project `.venv` created with `uv venv` + `uv pip install pytest`. Wherever a later task shows `python3 -m pytest ...`, run it as `uv run pytest ...`. `.venv/` is gitignored.
 
 ---
 
