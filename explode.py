@@ -379,6 +379,16 @@ def resolve_token(design, token):
     return None
 
 
+def delete_copy(copy_occ):
+    """Delete an exploded copy and its tag together. Deleting the occurrence
+    alone leaves the explodedCopy attribute behind in the design's attribute
+    store, so the tag must be removed explicitly."""
+    tag = copy_occ.attributes.itemByName(ATTR_GROUP, ATTR_COPY)
+    if tag:
+        tag.deleteMe()
+    copy_occ.deleteMe()
+
+
 def restore_all(design):
     """Delete every tagged copy and unhide every tagged original, across all
     outstanding batches from any session. Returns the restored copy count."""
@@ -392,8 +402,10 @@ def restore_all(design):
         else:
             log('Restore: original for one copy no longer exists; deleting copy anyway')
         if copy_occ:
-            copy_occ.deleteMe()
+            delete_copy(copy_occ)
             restored += 1
+        else:
+            attr.deleteMe()  # orphaned tag (copy already gone)
     for attr in find_tagged_attributes(design, ATTR_ORIGINAL):
         original = adsk.fusion.Occurrence.cast(attr.parent) if attr.parent else None
         if original:
@@ -427,7 +439,7 @@ def flip_last_batch(design):
             continue
         old_copy = copies_by_original.get(item['token'])
         if old_copy:
-            old_copy.deleteMe()
+            delete_copy(old_copy)
         else:
             log('Flip: copy for {} was missing; recreating'.format(occurrence_label(original)))
         item['sign'] = -item['sign']

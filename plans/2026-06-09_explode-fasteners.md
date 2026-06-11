@@ -987,6 +987,16 @@ def resolve_token(design, token):
     return None
 
 
+def delete_copy(copy_occ):
+    """Delete an exploded copy and its tag together. Deleting the occurrence
+    alone leaves the explodedCopy attribute behind in the design's attribute
+    store, so the tag must be removed explicitly."""
+    tag = copy_occ.attributes.itemByName(ATTR_GROUP, ATTR_COPY)
+    if tag:
+        tag.deleteMe()
+    copy_occ.deleteMe()
+
+
 def restore_all(design):
     """Delete every tagged copy and unhide every tagged original, across all
     outstanding batches from any session. Returns the restored copy count."""
@@ -1000,8 +1010,10 @@ def restore_all(design):
         else:
             log('Restore: original for one copy no longer exists; deleting copy anyway')
         if copy_occ:
-            copy_occ.deleteMe()
+            delete_copy(copy_occ)
             restored += 1
+        else:
+            attr.deleteMe()  # orphaned tag (copy already gone)
     for attr in find_tagged_attributes(design, ATTR_ORIGINAL):
         original = adsk.fusion.Occurrence.cast(attr.parent) if attr.parent else None
         if original:
@@ -1038,7 +1050,7 @@ def flip_last_batch(design):
             continue
         old_copy = copies_by_original.get(item['token'])
         if old_copy:
-            old_copy.deleteMe()
+            delete_copy(old_copy)
         else:
             log('Flip: copy for {} was missing; recreating'.format(occurrence_label(original)))
         item['sign'] = -item['sign']
@@ -1316,6 +1328,7 @@ The script builds its own fixture (plate with a through-hole screw+nut pair and 
 ```python
 # ABOUTME: Self-contained in-Fusion integration test for the explode feature —
 # ABOUTME: builds a fixture assembly, runs explode/flip/restore, asserts results.
+import importlib
 import math
 import os
 import sys
@@ -1327,6 +1340,7 @@ import adsk.fusion
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO_ROOT)
 import explode  # noqa: E402
+importlib.reload(explode)  # pick up file edits even if the add-in cached the module
 
 # Set from spike Finding 2: timeline items left after a copy's deleteMe in
 # parametric mode. 0 when Finding 2 reported a clean timeline; bump to the
@@ -1387,10 +1401,12 @@ def build_plate(root):
                     adsk.fusion.FeatureOperations.CutFeatureOperation)
 
 
-def build_screw(parent_occurrences, name, world_x, head_top_z):
+def build_screw(parent_occurrences, name, world_x, head_top_z, seat=True):
     """Simplified SHCS: shank r0.15 x 1.0 long pointing -Z from z=0, head r0.275
-    x 0.3 tall above. Seated so the head sits on the plate top (head bottom at
-    z = head_top_z - 0.3)."""
+    x 0.3 tall above. When seat=True (root-level occurrences only) the screw is
+    seated so the head bottom sits at z = head_top_z - 0.3. Native nested
+    occurrences reject a transform2 override, so seat=False leaves the screw
+    head-up at the component origin (placement doesn't affect the assertions)."""
     t = adsk.core.Matrix3D.create()
     occ = parent_occurrences.addNewComponent(t)
     comp = occ.component
@@ -1408,9 +1424,10 @@ def build_screw(parent_occurrences, name, world_x, head_top_z):
     extrude_profile(comp, head_sketch.profiles.item(0), 0.3,
                     adsk.fusion.FeatureOperations.JoinFeatureOperation)
 
-    seat = adsk.core.Matrix3D.create()
-    seat.translation = adsk.core.Vector3D.create(world_x, 0, head_top_z - 0.3)
-    occ.transform2 = seat
+    if seat:
+        seat_m = adsk.core.Matrix3D.create()
+        seat_m.translation = adsk.core.Vector3D.create(world_x, 0, head_top_z - 0.3)
+        occ.transform2 = seat_m
     return occ
 
 
@@ -1458,13 +1475,15 @@ def run(context):
         screw1 = build_screw(root.occurrences, 'Screw1', -1.5, 0.8)
         # square nut under the same hole, coaxial with screw1, top face on plate bottom
         nut = build_square_nut(root.occurrences, -1.5, 0.0)
-        # subassembly at x=+1.5 containing a nested screw seated in the blind... the
-        # blind hole is at x=0; place the subassembly so its inner screw lands at x=0.
+        # subassembly at x=+1.5 holding a nested, head-up screw. A nested
+        # occurrence can't take a transform2 override, so Screw2 stays at the
+        # subassembly origin — its placement doesn't affect the assertions,
+        # which only check the copy's offset from the original.
         sub_t = adsk.core.Matrix3D.create()
         sub_t.translation = adsk.core.Vector3D.create(1.5, 0, 0)
         sub_occ = root.occurrences.addNewComponent(sub_t)
         sub_occ.component.name = 'SubAssembly'
-        nested_screw_native = build_screw(sub_occ.component.occurrences, 'Screw2', -1.5, 0.8)
+        build_screw(sub_occ.component.occurrences, 'Screw2', -1.5, 0.8, seat=False)
 
         # root-context proxy for the nested screw
         screw2 = None
