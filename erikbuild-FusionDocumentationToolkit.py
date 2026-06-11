@@ -8,6 +8,11 @@ import json
 import os
 import struct
 import zlib
+import sys
+import importlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import explode
 
 _app = None
 _ui = None
@@ -418,7 +423,12 @@ def run(context):
 
         init_capture_defaults()
 
-        purge_stale_controls((CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID))
+        importlib.reload(explode)
+        explode.init(_app, _ui, _config)
+
+        purge_stale_controls((CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID,
+                              explode.EXPLODE_CMD_ID, explode.RESTORE_CMD_ID,
+                              explode.FLIP_CMD_ID))
 
         panel = None
         if _config.get('use_custom_panel'):
@@ -449,6 +459,19 @@ def run(context):
                          os.path.join(resources_root, 'configureCapture'),
                          ConfigureCaptureCreatedHandler())
 
+        register_command(panel, explode.EXPLODE_CMD_ID, explode.EXPLODE_CMD_NAME,
+                         explode.EXPLODE_CMD_DESCRIPTION,
+                         os.path.join(resources_root, 'explodeFasteners'),
+                         explode.ExplodeCreatedHandler())
+        register_command(panel, explode.RESTORE_CMD_ID, explode.RESTORE_CMD_NAME,
+                         explode.RESTORE_CMD_DESCRIPTION,
+                         os.path.join(resources_root, 'restoreFasteners'),
+                         explode.RestoreCreatedHandler())
+        register_command(panel, explode.FLIP_CMD_ID, explode.FLIP_CMD_NAME,
+                         explode.FLIP_CMD_DESCRIPTION,
+                         os.path.join(resources_root, 'flipExplode'),
+                         explode.FlipCreatedHandler())
+
     except:
         if _ui:
             _ui.messageBox('Failed to start FusionDocumentationToolkit:\n{}'.format(traceback.format_exc()))
@@ -457,7 +480,9 @@ def run(context):
 def stop(context):
     global _handlers, _active_panel_id, _custom_panel_id
     try:
-        cmd_ids = (CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID)
+        cmd_ids = (CMD_ID, CAPTURE_CMD_ID, CONFIGURE_CAPTURE_CMD_ID,
+                   explode.EXPLODE_CMD_ID, explode.RESTORE_CMD_ID,
+                   explode.FLIP_CMD_ID)
         purge_stale_controls(cmd_ids)
 
         if _custom_panel_id:

@@ -1078,7 +1078,7 @@ Expected: `import ok`, 25 passed.
 - [ ] **Step 1: Append the command handlers** to `explode.py`:
 
 ```python
-class ExplodeCreatedHandler(adsk.core.CommandCreatedEventHandler):
+class ExplodeCreatedHandler(_CommandCreatedHandler):
     """Captures the user's pre-selection before Fusion clears it, then defers
     all work to execute. isAutoExecute keeps the command dialog-free so a
     hotkey press fires instantly (mirrors the Capture Image pattern)."""
@@ -1104,7 +1104,7 @@ class ExplodeCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 _ui.messageBox('Explode setup failed:\n{}'.format(traceback.format_exc()))
 
 
-class ExplodeExecuteHandler(adsk.core.CommandEventHandler):
+class ExplodeExecuteHandler(_CommandEventHandler):
     def notify(self, args):
         try:
             design = active_design()
@@ -1136,7 +1136,7 @@ class ExplodeExecuteHandler(adsk.core.CommandEventHandler):
                 _ui.messageBox('Explode failed:\n{}'.format(traceback.format_exc()))
 
 
-class RestoreCreatedHandler(adsk.core.CommandCreatedEventHandler):
+class RestoreCreatedHandler(_CommandCreatedHandler):
     def notify(self, args):
         try:
             cmd = args.command
@@ -1153,7 +1153,7 @@ class RestoreCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 _ui.messageBox('Restore setup failed:\n{}'.format(traceback.format_exc()))
 
 
-class RestoreExecuteHandler(adsk.core.CommandEventHandler):
+class RestoreExecuteHandler(_CommandEventHandler):
     def notify(self, args):
         try:
             design = active_design()
@@ -1173,7 +1173,7 @@ class RestoreExecuteHandler(adsk.core.CommandEventHandler):
                 _ui.messageBox('Restore failed:\n{}'.format(traceback.format_exc()))
 
 
-class FlipCreatedHandler(adsk.core.CommandCreatedEventHandler):
+class FlipCreatedHandler(_CommandCreatedHandler):
     def notify(self, args):
         try:
             cmd = args.command
@@ -1190,7 +1190,7 @@ class FlipCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 _ui.messageBox('Flip setup failed:\n{}'.format(traceback.format_exc()))
 
 
-class FlipExecuteHandler(adsk.core.CommandEventHandler):
+class FlipExecuteHandler(_CommandEventHandler):
     def notify(self, args):
         try:
             design = active_design()
@@ -1210,7 +1210,7 @@ class FlipExecuteHandler(adsk.core.CommandEventHandler):
                 _ui.messageBox('Flip failed:\n{}'.format(traceback.format_exc()))
 ```
 
-Also add `import traceback` to the imports at the top of `explode.py` (next to `import math`).
+Also extend the guarded import at the top of `explode.py`: add `import traceback` next to `import math`, and inside the `try` add `_CommandCreatedHandler = adsk.core.CommandCreatedEventHandler` and `_CommandEventHandler = adsk.core.CommandEventHandler`, with the `except ImportError` branch setting both aliases to `object`. The handlers subclass these aliases (not `adsk.core.*` directly) so the module still imports under pytest — subclassing `adsk.core.*` when `adsk` is `None` raises `AttributeError` at class-definition time.
 
 - [ ] **Step 2: Wire the module into the main file.** In `erikbuild-FusionDocumentationToolkit.py`:
 

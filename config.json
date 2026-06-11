@@ -13,6 +13,9 @@
         "default_dpi": 300,
         "filename_prefix": "capture"
     },
+    "explode": {
+        "distance_mm": 20
+    },
     "presets": {
         "voron": {
             "label": "Voron Manual Mode",

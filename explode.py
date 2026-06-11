@@ -2,12 +2,17 @@
 # ABOUTME: screenshots — pure decision logic plus Fusion API adapters.
 
 import math
+import traceback
 
 try:
     import adsk.core
     import adsk.fusion
+    _CommandCreatedHandler = adsk.core.CommandCreatedEventHandler
+    _CommandEventHandler = adsk.core.CommandEventHandler
 except ImportError:
     adsk = None  # pure decision functions stay importable under pytest
+    _CommandCreatedHandler = object   # handlers never run under pytest
+    _CommandEventHandler = object
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +440,139 @@ def flip_last_batch(design):
     if not surviving:
         _last_batch = None
     return flipped, None
+
+
+# ---------------------------------------------------------------------------
+# Command handlers — registered by the main add-in file.
+# ---------------------------------------------------------------------------
+
+class ExplodeCreatedHandler(_CommandCreatedHandler):
+    """Captures the user's pre-selection before Fusion clears it, then defers
+    all work to execute. isAutoExecute keeps the command dialog-free so a
+    hotkey press fires instantly (mirrors the Capture Image pattern)."""
+
+    def notify(self, args):
+        global _pending_selection
+        try:
+            cmd = args.command
+            try:
+                cmd.isAutoExecute = True
+            except AttributeError:
+                pass
+            cmd.isExecutedWhenPreEmpted = False
+            _pending_selection = []
+            selections = _ui.activeSelections
+            for i in range(selections.count):
+                _pending_selection.append(selections.item(i).entity)
+            on_execute = ExplodeExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            if _ui:
+                _ui.messageBox('Explode setup failed:\n{}'.format(traceback.format_exc()))
+
+
+class ExplodeExecuteHandler(_CommandEventHandler):
+    def notify(self, args):
+        try:
+            design = active_design()
+            if not design:
+                _ui.messageBox('Open a design before exploding fasteners.')
+                return
+            if not timeline_at_end(design):
+                _ui.messageBox('Move the timeline marker to the end before exploding fasteners.')
+                return
+            if not _pending_selection:
+                _ui.messageBox('Select one or more fasteners first.')
+                return
+            occurrences, skipped = resolve_to_occurrences(
+                _pending_selection, design.rootComponent)
+            distance_mm, adjusted = lift_distance_mm(_config)
+            if adjusted:
+                log('Configured explode.distance_mm was invalid; using {}mm'.format(distance_mm))
+            exploded, engine_skipped = explode_occurrences(
+                occurrences, mm_to_cm(distance_mm), design)
+            for label, reason in skipped + engine_skipped:
+                log('Skipped {}: {}'.format(label, reason))
+            if exploded:
+                log('Exploded {} fastener(s) by {}mm'.format(exploded, distance_mm))
+            else:
+                _ui.messageBox('Nothing to explode: all selected items were skipped '
+                               '(see Text Commands palette).')
+        except Exception:
+            if _ui:
+                _ui.messageBox('Explode failed:\n{}'.format(traceback.format_exc()))
+
+
+class RestoreCreatedHandler(_CommandCreatedHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            try:
+                cmd.isAutoExecute = True
+            except AttributeError:
+                pass
+            cmd.isExecutedWhenPreEmpted = False
+            on_execute = RestoreExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            if _ui:
+                _ui.messageBox('Restore setup failed:\n{}'.format(traceback.format_exc()))
+
+
+class RestoreExecuteHandler(_CommandEventHandler):
+    def notify(self, args):
+        try:
+            design = active_design()
+            if not design:
+                _ui.messageBox('Open a design before restoring fasteners.')
+                return
+            if not timeline_at_end(design):
+                _ui.messageBox('Move the timeline marker to the end before restoring fasteners.')
+                return
+            restored = restore_all(design)
+            if restored:
+                log('Restored {} fastener(s)'.format(restored))
+            else:
+                log('Restore: nothing to restore')
+        except Exception:
+            if _ui:
+                _ui.messageBox('Restore failed:\n{}'.format(traceback.format_exc()))
+
+
+class FlipCreatedHandler(_CommandCreatedHandler):
+    def notify(self, args):
+        try:
+            cmd = args.command
+            try:
+                cmd.isAutoExecute = True
+            except AttributeError:
+                pass
+            cmd.isExecutedWhenPreEmpted = False
+            on_execute = FlipExecuteHandler()
+            cmd.execute.add(on_execute)
+            _handlers.append(on_execute)
+        except Exception:
+            if _ui:
+                _ui.messageBox('Flip setup failed:\n{}'.format(traceback.format_exc()))
+
+
+class FlipExecuteHandler(_CommandEventHandler):
+    def notify(self, args):
+        try:
+            design = active_design()
+            if not design:
+                _ui.messageBox('Open a design before flipping.')
+                return
+            if not timeline_at_end(design):
+                _ui.messageBox('Move the timeline marker to the end before flipping.')
+                return
+            flipped, reason = flip_last_batch(design)
+            if flipped:
+                log('Flipped {} fastener(s)'.format(flipped))
+            else:
+                log('Flip: nothing to flip ({})'.format(reason))
+        except Exception:
+            if _ui:
+                _ui.messageBox('Flip failed:\n{}'.format(traceback.format_exc()))
