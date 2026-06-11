@@ -1,0 +1,6 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "scriptType": "python",
+    "description": "Verifies copyToComponent behavior for the linked-fastener copy fallback."
+}
