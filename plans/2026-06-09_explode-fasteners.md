@@ -265,12 +265,12 @@ def run(context):
   - Finding 5b not world-space, or 5c shows origins coincide → revise Task 6's `head_end_sign` to take an axial reference from the face bounding box instead of the surface origin (and Task 9's `axis_faces` to supply it) before writing those tests.
   - Finding 2 leaves timeline residue → not a blocker: note it here and in the spec's Parametric vs Direct Mode section, surface it to Erik, and adjust the Task 12 timeline assertion to expect the residue (Restore still works; the timeline just isn't pristine).
 
-**Spike findings (fill in):**
-- Finding 1:
-- Finding 2:
-- Finding 3:
-- Finding 4:
-- Finding 5:
+**Spike findings (recorded 2026-06-11):**
+- **Finding 1 — PASS.** `addExistingComponent` on `root.occurrences` is ROOT-RELATIVE: requested (10,5,3), `transform2.translation` read back (10,5,3). Tasks 9/10 lift transform is sound.
+- **Finding 2 — PASS (clean).** Timeline count 4→5 (copy)→4 (deleteMe); `deleteMe` returned True. No residue, so `EXPECTED_TIMELINE_RESIDUE = 0` in Task 12.
+- **Finding 3 — PASS.** Body proxy `assemblyContext = 'SubAssembly:1+InnerPart:1'`; `nativeObject.parentComponent` + `allOccurrencesByComponent` + entity-token match resolved back to `SubAssembly:1+InnerPart:1`. Task 8 selection resolution is sound.
+- **Finding 4 — PASS.** `findAttributes` returned the tagged original and copy; `attr.parent` cast to Occurrence; the stored token round-tripped and `findEntityByToken` resolved it back to the original occurrence. Restore/Flip tracking is sound. **Constraint learned:** `entityToken` is only valid for proxies whose top-level parent is the root component (the v1 spike crashed reading it from a *native* nested occurrence). The design only ever tags root-context occurrences (selections + `addExistingComponent` copies), so it's safe — but Task 8/10 should keep that invariant.
+- **Finding 5 — 5a/5b PASS, 5c FAIL → head_end_sign revised.** 5b: proxy face geometry is world-space (origins at z≈20). 5a/5c: both the head (r0.275) and shank (r0.15) cylinder faces report `origin=(0,0,20)` — the **surface origin is at the sketch plane, not the face's physical location**, so it can't reliably mark the head end (works on a benign fixture by luck, fails when the part's sketch plane is placed differently). **Resolution (plan-pre-authorized): `axis_faces` supplies each face's `boundingBox` center as its axial position; `head_end_sign` uses that instead of the surface origin.** Finding 5d (added to the spike) confirms the bbox approach before Task 6 is written.
 
 - [ ] **Step 5: Checkpoint — ask Erik to review and commit.** Suggested message: `Add API spike script for explode feature.`
 
@@ -451,13 +451,13 @@ Expected: 11 passed.
 - Modify: `explode.py`
 - Modify: `tests/test_explode_logic.py`
 
-Face records are plain dicts: `{'axis': (x,y,z), 'area': float, 'radius': float, 'origin': (x,y,z)}` — the adapter (Task 9) builds them from world-space face proxies.
+Face records are plain dicts: `{'axis': (x,y,z), 'area': float, 'radius': float, 'center': (x,y,z)}` — the adapter (Task 9) builds them from world-space face proxies. `center` is each face's bounding-box center (its physical axial position); spike Finding 5c showed the cylinder *surface* origin sits at the modeling sketch plane and can't mark the head end.
 
 - [ ] **Step 1: Append the failing tests:**
 
 ```python
-def face(axis, area, radius=0.15, origin=(0, 0, 0)):
-    return {'axis': axis, 'area': area, 'radius': radius, 'origin': origin}
+def face(axis, area, radius=0.15, center=(0, 0, 0)):
+    return {'axis': axis, 'area': area, 'radius': radius, 'center': center}
 
 
 class TestDominantAxis:
@@ -564,22 +564,22 @@ Expected: 18 passed.
 ```python
 class TestHeadEndSign:
     def test_head_above_center_gives_positive(self):
-        coaxial = [face((0, 0, 1), 1.0, radius=0.15, origin=(0, 0, -0.5)),   # shank
-                   face((0, 0, 1), 0.5, radius=0.275, origin=(0, 0, 0.15))]  # head OD
+        coaxial = [face((0, 0, 1), 1.0, radius=0.15, center=(0, 0, -0.5)),   # shank
+                   face((0, 0, 1), 0.5, radius=0.275, center=(0, 0, 0.15))]  # head OD
         assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, -0.35)) == 1
 
     def test_head_below_center_gives_negative(self):
-        coaxial = [face((0, 0, 1), 1.0, radius=0.15, origin=(0, 0, 0.5)),
-                   face((0, 0, 1), 0.5, radius=0.275, origin=(0, 0, -0.15))]
+        coaxial = [face((0, 0, 1), 1.0, radius=0.15, center=(0, 0, 0.5)),
+                   face((0, 0, 1), 0.5, radius=0.275, center=(0, 0, -0.15))]
         assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, 0.35)) == -1
 
     def test_equal_radii_is_inapplicable(self):
-        coaxial = [face((0, 0, 1), 1.0, radius=0.125, origin=(0, 0, 0))]  # nut bore
+        coaxial = [face((0, 0, 1), 1.0, radius=0.125, center=(0, 0, 0))]  # nut bore
         assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, 0)) is None
 
     def test_nearly_equal_radii_is_inapplicable(self):
-        coaxial = [face((0, 0, 1), 1.0, radius=0.150, origin=(0, 0, -0.5)),
-                   face((0, 0, 1), 0.5, radius=0.154, origin=(0, 0, 0.15))]
+        coaxial = [face((0, 0, 1), 1.0, radius=0.150, center=(0, 0, -0.5)),
+                   face((0, 0, 1), 0.5, radius=0.154, center=(0, 0, 0.15))]
         assert explode.head_end_sign(coaxial, (0, 0, 1), (0, 0, -0.35)) is None
 
     def test_no_coaxial_faces_is_inapplicable(self):
@@ -609,7 +609,7 @@ Expected: 7 failed with `AttributeError`.
 HEAD_RADIUS_RATIO = 1.05  # head must be at least 5% larger than the shank
 
 
-def head_end_sign(coaxial_faces, axis, center):
+def head_end_sign(coaxial_faces, axis, body_center):
     """Sign along axis pointing toward the fastener's larger-diameter (head)
     end. 'Out' is always toward the head for seated screws, bolts, and flanged
     inserts. Returns None when inapplicable: no coaxial faces (local-Z
@@ -620,7 +620,7 @@ def head_end_sign(coaxial_faces, axis, center):
     if max(radii) < min(radii) * HEAD_RADIUS_RATIO:
         return None
     head_face = max(coaxial_faces, key=lambda f: f['radius'])
-    position = v_dot(v_sub(head_face['origin'], center), axis)
+    position = v_dot(v_sub(head_face['center'], body_center), axis)
     if position == 0:
         return None
     return 1 if position > 0 else -1
@@ -815,7 +815,10 @@ Note: the cone branch of `axis_faces` reads `geom.radius`. Confirm `adsk.core.Co
 ```python
 def axis_faces(occ):
     """Face records for the pure inference functions, from the occurrence's
-    bodies in world space (proxies). Cylinders and cones only."""
+    bodies in world space (proxies). Cylinders and cones only. 'center' is the
+    face's bounding-box center — its physical axial position. (The surface
+    origin sits at the modeling sketch plane, not the face, so it can't mark
+    the head end — spike Finding 5c.)"""
     records = []
     for i in range(occ.bRepBodies.count):
         body = occ.bRepBodies.item(i)
@@ -828,10 +831,14 @@ def axis_faces(occ):
                 axis, radius = geom.axis, geom.radius
             else:
                 continue
+            bb = f.boundingBox
+            center = ((bb.minPoint.x + bb.maxPoint.x) / 2.0,
+                      (bb.minPoint.y + bb.maxPoint.y) / 2.0,
+                      (bb.minPoint.z + bb.maxPoint.z) / 2.0)
             records.append({'axis': (axis.x, axis.y, axis.z),
                             'area': f.area,
                             'radius': radius,
-                            'origin': (geom.origin.x, geom.origin.y, geom.origin.z)})
+                            'center': center})
     return records
 
 

@@ -1,0 +1,6 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "scriptType": "python",
+    "description": "Verifies API behaviors for the explode-fasteners feature."
+}
