@@ -317,8 +317,8 @@ def lifted_transform(occ, axis, sign, distance_cm):
 
 def create_lifted_copy(design, occ, axis, sign, distance_cm):
     """Phase-B mutation for one fastener: copy into root at the lifted
-    position, tag both occurrences, hide the original. Returns the copy or
-    None on failure."""
+    position, tag both occurrences, show the copy, hide the original. Returns
+    the copy or None on failure."""
     root = design.rootComponent
     copy_occ = root.occurrences.addExistingComponent(
         occ.component, lifted_transform(occ, axis, sign, distance_cm))
@@ -326,6 +326,9 @@ def create_lifted_copy(design, occ, axis, sign, distance_cm):
         return None
     copy_occ.attributes.add(ATTR_GROUP, ATTR_COPY, occ.entityToken)
     occ.attributes.add(ATTR_GROUP, ATTR_ORIGINAL, '1')
+    # Force the copy visible: a new occurrence inherits its source's light-bulb
+    # state, and during Flip the source original is already hidden.
+    copy_occ.isLightBulbOn = True
     occ.isLightBulbOn = False
     return copy_occ
 

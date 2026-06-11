@@ -38,6 +38,9 @@ Repeat for **Configure Capture** if you want a separate shortcut for the setting
 | **Voron-style Mode Switch** | Toggles between the bundled Voron-style visual preset and Fusion defaults. |
 | **Capture Image** | Silent capture. First press of each Fusion session prompts for an output folder; later presses save auto-numbered files (`capture_001.png`, `capture_002.png`, …) with DPI metadata embedded. Status logs to the Text Commands palette. |
 | **Configure Capture** | Edit per-session capture settings: folder, dimensions, format (PNG/JPG), DPI, transparent background, anti-aliasing. |
+| **Explode Fasteners** | Copies the selected fasteners 20mm out along their insertion axes and hides the originals — empty-hole shots without moving the assembly. Direction is inferred from the fastener's geometry. |
+| **Flip Last Explode** | Re-lifts the most recent explode batch to the opposite side, for when the direction guess is wrong. |
+| **Restore Fasteners** | Deletes all exploded copies and unhides the originals, across every outstanding batch. |
 
 ## Configuration
 
@@ -48,6 +51,7 @@ All settings live in `config.json` next to the source. Edit and re-run the add-i
 - `capture.default_format` — `"png"` or `"jpg"`.
 - `presets.voron.commands` / `presets.default.commands` — Fusion text commands applied when toggling. Edit to build your own preset.
 - `panel_name` — toolbar panel label (default `DOCUMENTATION`).
+- `explode.distance_mm` — how far Explode Fasteners lifts copies (default `20`, clamped 1–500).
 
 The bundled `voron` preset matches the Voron Design Team's recommended assembly-manual settings: Photobooth environment, wireframe with visible edges only, ambient occlusion on, ground plane / shadow / reflection off, orthographic camera. One setting the API can't script is **Hidden Edge Dimming** — set it to 0% once in Fusion's Preferences and leave it.
 

@@ -205,6 +205,8 @@ def run(context):
                   world_z(copy_s2) - z_screw2))
         check(copy_s2.assemblyContext is None,
               'explode: nested screw copy landed in root')
+        check(copy_s1.isLightBulbOn and copy_nut.isLightBulbOn and copy_s2.isLightBulbOn,
+              'explode: copies are visible')
 
         # --- double explode is skipped (the guard lives in resolve_to_occurrences,
         # which is what the command handler feeds the engine from) ---
@@ -220,6 +222,8 @@ def run(context):
             by_original[attr.value] = adsk.fusion.Occurrence.cast(attr.parent)
         check(abs(world_z(by_original[screw1.entityToken]) - (z_screw1 - 2.0)) < 1e-5,
               'flip: screw1 copy now at -Z offset')
+        check(by_original[screw1.entityToken].isLightBulbOn,
+              'flip: flipped copy is visible')
         flipped_back, _ = explode.flip_last_batch(design)
         check(flipped_back == 3, 'flip: second flip returns to first guess')
         by_original = {}

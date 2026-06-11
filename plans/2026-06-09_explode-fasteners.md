@@ -922,8 +922,8 @@ def lifted_transform(occ, axis, sign, distance_cm):
 
 def create_lifted_copy(design, occ, axis, sign, distance_cm):
     """Phase-B mutation for one fastener: copy into root at the lifted
-    position, tag both occurrences, hide the original. Returns the copy or
-    None on failure."""
+    position, tag both occurrences, show the copy, hide the original. Returns
+    the copy or None on failure."""
     root = design.rootComponent
     copy_occ = root.occurrences.addExistingComponent(
         occ.component, lifted_transform(occ, axis, sign, distance_cm))
@@ -931,6 +931,9 @@ def create_lifted_copy(design, occ, axis, sign, distance_cm):
         return None
     copy_occ.attributes.add(ATTR_GROUP, ATTR_COPY, occ.entityToken)
     occ.attributes.add(ATTR_GROUP, ATTR_ORIGINAL, '1')
+    # Force the copy visible: a new occurrence inherits its source's light-bulb
+    # state, and during Flip the source original is already hidden.
+    copy_occ.isLightBulbOn = True
     occ.isLightBulbOn = False
     return copy_occ
 
@@ -1533,6 +1536,8 @@ def run(context):
                   world_z(copy_s2) - z_screw2))
         check(copy_s2.assemblyContext is None,
               'explode: nested screw copy landed in root')
+        check(copy_s1.isLightBulbOn and copy_nut.isLightBulbOn and copy_s2.isLightBulbOn,
+              'explode: copies are visible')
 
         # --- double explode is skipped (the guard lives in resolve_to_occurrences,
         # which is what the command handler feeds the engine from) ---
@@ -1549,6 +1554,8 @@ def run(context):
             by_original[attr.value] = adsk.fusion.Occurrence.cast(attr.parent)
         check(abs(world_z(by_original[screw1.entityToken]) - (z_screw1 - 2.0)) < 1e-5,
               'flip: screw1 copy now at -Z offset')
+        check(by_original[screw1.entityToken].isLightBulbOn,
+              'flip: flipped copy is visible')
         flipped_back, _ = explode.flip_last_batch(design)
         check(flipped_back == 3, 'flip: second flip returns to first guess')
         by_original = {}

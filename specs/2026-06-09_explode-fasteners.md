@@ -61,7 +61,7 @@ Runs only after Phase A has produced an axis, sign, and distance for every survi
 
 4. **Create each copy.** `rootComponent.occurrences.addExistingComponent(occ.component, T)` where `T` is the original's world transform pre-multiplied by a translation of `sign × axis × distance`. Copies always land in the **root component** — adding them to a nested parent would edit that component's definition and duplicate the copy into every instance of the subassembly. The lift offset is part of the creation transform; the copy's transform is never edited afterward, so no Capture Position / snapshot machinery is needed in parametric mode.
 
-5. **Hide each original** (`isLightBulbOn = False`).
+5. **Show each copy, hide each original** (`isLightBulbOn` on for the copy, off for the original). The copy must be forced visible: a new occurrence inherits its source's light-bulb state, and Flip recreates the copy from an already-hidden original.
 
 6. **Tag for tracking** with persistent attributes (group `FusionDocumentationToolkit`):
    - on the copy: `explodedCopy` = entity token of the original occurrence;
