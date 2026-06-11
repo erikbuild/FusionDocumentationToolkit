@@ -320,8 +320,13 @@ def create_lifted_copy(design, occ, axis, sign, distance_cm):
     position, tag both occurrences, show the copy, hide the original. Returns
     the copy or None on failure."""
     root = design.rootComponent
-    copy_occ = root.occurrences.addExistingComponent(
-        occ.component, lifted_transform(occ, axis, sign, distance_cm))
+    transform = lifted_transform(occ, axis, sign, distance_cm)
+    try:
+        copy_occ = root.occurrences.addExistingComponent(occ.component, transform)
+    except Exception:
+        # addExistingComponent raises 'add operation failed' for externally-linked
+        # components — a foreign-document definition can't be instanced into root.
+        copy_occ = None
     if not copy_occ:
         return None
     copy_occ.attributes.add(ATTR_GROUP, ATTR_COPY, occ.entityToken)
