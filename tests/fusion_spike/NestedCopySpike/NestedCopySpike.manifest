@@ -1,0 +1,6 @@
+{
+    "autodeskProduct": "Fusion360",
+    "type": "script",
+    "scriptType": "python",
+    "description": "Diagnoses copyToComponent coordinate frame for nested occurrences."
+}

@@ -61,6 +61,8 @@ Runs only after Phase A has produced an axis, sign, and distance for every survi
 
 4. **Create each copy.** `rootComponent.occurrences.addExistingComponent(occ.component, T)` where `T` is the original's world transform pre-multiplied by a translation of `sign × axis × distance`. Copies always land in the **root component** — adding them to a nested parent would edit that component's definition and duplicate the copy into every instance of the subassembly. The lift offset is part of the creation transform; the copy's transform is never edited afterward, so no Capture Position / snapshot machinery is needed in parametric mode.
 
+   **Externally-linked fasteners** can't be instanced this way — `addExistingComponent` raises `add operation failed` for a foreign-document definition. For those, fall back to copying the occurrence's bodies into a fresh root component (`BRepBody.copyToComponent`, which preserves appearance) and shifting that component by the lift offset. `copyToComponent` lands a nested body at its world position, so a plain offset translation lifts it correctly — re-applying the occurrence transform would double it. The native instancing path stays the default; the body-copy is the fallback only when instancing fails.
+
 5. **Show each copy, hide each original** (`isLightBulbOn` on for the copy, off for the original). The copy must be forced visible: a new occurrence inherits its source's light-bulb state, and Flip recreates the copy from an already-hidden original.
 
 6. **Tag for tracking** with persistent attributes (group `FusionDocumentationToolkit`):

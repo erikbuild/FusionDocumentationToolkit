@@ -315,6 +315,32 @@ def lifted_transform(occ, axis, sign, distance_cm):
     return m
 
 
+def copy_bodies_to_root(design, occ, axis, sign, distance_cm):
+    """Fallback copy for components that can't be instanced (externally linked):
+    copy the occurrence's bodies into a fresh root component and shift it by the
+    lift offset. copyToComponent lands a nested body at its world position with
+    orientation baked in, so a plain offset translation lifts it correctly (no
+    occurrence transform — that would double-apply). Returns the new occurrence,
+    or None if nothing could be copied."""
+    root = design.rootComponent
+    target = root.occurrences.addNewComponent(adsk.core.Matrix3D.create())
+    copied = 0
+    for i in range(occ.bRepBodies.count):
+        try:
+            occ.bRepBodies.item(i).copyToComponent(target)
+            copied += 1
+        except Exception:
+            pass
+    if not copied:
+        target.deleteMe()
+        return None
+    offset = v_scale(axis, sign * distance_cm)
+    shift = adsk.core.Matrix3D.create()
+    shift.translation = adsk.core.Vector3D.create(offset[0], offset[1], offset[2])
+    target.transform2 = shift
+    return target
+
+
 def create_lifted_copy(design, occ, axis, sign, distance_cm):
     """Phase-B mutation for one fastener: copy into root at the lifted
     position, tag both occurrences, show the copy, hide the original. Returns
@@ -326,7 +352,8 @@ def create_lifted_copy(design, occ, axis, sign, distance_cm):
     except Exception:
         # addExistingComponent raises 'add operation failed' for externally-linked
         # components — a foreign-document definition can't be instanced into root.
-        copy_occ = None
+        # Fall back to copying the bodies into a fresh root component.
+        copy_occ = copy_bodies_to_root(design, occ, axis, sign, distance_cm)
     if not copy_occ:
         return None
     copy_occ.attributes.add(ATTR_GROUP, ATTR_COPY, occ.entityToken)
